@@ -148,34 +148,68 @@ function isHotlineSubmission(text, files) {
    ─────────────────────────────────────────── */
 function parseBrief(text) {
   const fields = {};
-  const patterns = {
-    requestId: /(?:Request\s*ID|Ticket)[:\s]*([A-Z]{1,4}-\d{4,6})/i,
-    brand: /(?:Brand|Client)[:\s]*(.+)/i,
-    campaign: /(?:Campaign(?:\s*Name)?|Initiative)[:\s]*(.+)/i,
-    handle: /(?:@?Handle|Twitter|X\s*Handle)[:\s]*(@?\w+)/i,
-    valueProp: /(?:Value\s*Prop(?:osition)?|Key\s*Message)[:\s]*(.+)/i,
-    cta: /(?:CTA|Call\s*to\s*Action)[:\s]*(.+)/i,
-    objective: /(?:Objective|Goal)[:\s]*(.+)/i,
-    kpi: /(?:KPI|Key\s*Performance|Success\s*Metric)[:\s]*(.+)/i,
-    audience: /(?:Audience|Target)[:\s]*(.+)/i,
-    timeline: /(?:Timeline|Dates?|Flight)[:\s]*(.+)/i,
-  };
 
-  for (const [key, rx] of Object.entries(patterns)) {
-    const m = text.match(rx);
-    if (m) fields[key] = m[1].trim();
+  // Strip Slack mrkdwn bold/italic markers for matching
+  const clean = text.replace(/[*_]/g, "");
+  const lines = clean.split("\n");
+
+  // Label matchers — key phrases from Workflow question labels.
+  // Each pattern is tested against the trimmed line.
+  const labelDefs = [
+    { key: "requestId", pattern: /request\s*id/i },
+    { key: "brand", pattern: /^brand\s*\??$/i },
+    { key: "campaign", pattern: /^campaign(\s*name)?\s*\??$/i },
+    { key: "handle", pattern: /(?:^handle\s*\??$|^.*(?:what|the)\s+@?handle)/i },
+    { key: "_budget", pattern: /budget/i },
+    { key: "valueProp", pattern: /value\s*prop/i },
+    { key: "objective", pattern: /want\s*people\s*to\s*do/i },
+    { key: "additionalInfo", pattern: /additional\s*info/i },
+  ];
+
+  function matchLabel(line) {
+    const trimmed = line.trim();
+    if (!trimmed) return null;
+    for (const def of labelDefs) {
+      if (def.pattern.test(trimmed)) return def.key;
+    }
+    return null;
   }
 
-  // Multi-line: capture from "Additional Information:" to next field label or end
-  const addInfoMatch = text.match(
-    /Additional\s*Information[:\s]*([\s\S]+?)(?=\n(?:Request\s*ID|Ticket|Brand|Client|Campaign|Initiative|@?Handle|Twitter|X\s*Handle|Value\s*Prop|Key\s*Message|CTA|Call\s*to\s*Action|Objective|Goal|KPI|Key\s*Performance|Success\s*Metric|Audience|Target|Timeline|Dates?|Flight)[:\s]|$)/i
-  );
-  if (addInfoMatch) fields.additionalInfo = addInfoMatch[1].trim();
+  // Skip "Submitted by <@...>" header line
+  let startLine = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*submitted\s+by\s+/i.test(lines[i])) {
+      startLine = i + 1;
+      break;
+    }
+  }
 
-  // Also try to grab the Request ID from the broader pattern if not caught
-  if (!fields.requestId) {
-    const m = text.match(REQUEST_ID_PATTERN);
-    if (m) fields.requestId = m[0];
+  // Walk lines: label → capture value lines below until next label
+  let currentKey = null;
+  let currentLines = [];
+
+  for (let i = startLine; i < lines.length; i++) {
+    const labelKey = matchLabel(lines[i]);
+    if (labelKey) {
+      // Save previous field
+      if (currentKey) {
+        const value = currentLines.join("\n").trim();
+        if (value && currentKey !== "_budget") {
+          fields[currentKey] = value;
+        }
+      }
+      currentKey = labelKey;
+      currentLines = [];
+    } else if (currentKey) {
+      currentLines.push(lines[i]);
+    }
+  }
+  // Save last field
+  if (currentKey) {
+    const value = currentLines.join("\n").trim();
+    if (value && currentKey !== "_budget") {
+      fields[currentKey] = value;
+    }
   }
 
   return {
