@@ -333,13 +333,13 @@ async function uploadSlackFileToXai(slackUrl, filename) {
    replies for Grok context.
    ─────────────────────────────────────────── */
 const HISTORY_MONTHS = 12;
-const MAX_EXAMPLES = 15;      // cap examples sent to Grok
-const MAX_PAGES = 10;         // cap pagination to avoid rate-limit hammering
+const MAX_EXAMPLES = 25;      // cap examples sent to Grok
+const MAX_PAGES = 50;         // safety ceiling — oldest cutoff normally stops pagination first
 const MSGS_PER_PAGE = 200;    // Slack max per page
 
 // Simple in-memory cache so we don't re-fetch 12 months on every trigger
 let historyCache = { examples: [], fetchedAt: 0 };
-const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const CACHE_TTL_MS = 60 * 60 * 1000; // 60 minutes
 
 async function fetchRecentExamples(client, channelId, currentTs) {
   // Return cache if fresh
@@ -349,6 +349,8 @@ async function fetchRecentExamples(client, channelId, currentTs) {
 
   const examples = [];
   const oldest = String(Math.floor(Date.now() / 1000) - HISTORY_MONTHS * 30 * 24 * 60 * 60);
+  let totalScanned = 0;
+  let pagesUsed = 0;
 
   try {
     let cursor;
@@ -362,9 +364,16 @@ async function fetchRecentExamples(client, channelId, currentTs) {
 
       const history = await client.conversations.history(params);
       const messages = history.messages || [];
+      totalScanned += messages.length;
+      pagesUsed = page + 1;
 
       for (const m of messages) {
-        if (!m.text || !isHotlineSubmission(m.text, m.files) || m.bot_id) continue;
+        // Skip empty messages
+        if (!m.text) continue;
+        // Skip our own messages (same logic as main handler)
+        if (m.user === BOT_USER_ID || (m.bot_id && m.bot_id === SELF_BOT_ID)) continue;
+        // Must look like a hotline submission
+        if (!isHotlineSubmission(m.text, m.files)) continue;
         if (m.ts === currentTs) continue;
 
         const example = {
@@ -373,7 +382,7 @@ async function fetchRecentExamples(client, channelId, currentTs) {
           response: null,
         };
 
-        // Fetch thread to find strategist / bot replies
+        // Fetch thread to find HUMAN strategist replies only
         try {
           const thread = await client.conversations.replies({
             channel: channelId,
@@ -381,15 +390,19 @@ async function fetchRecentExamples(client, channelId, currentTs) {
             limit: 15,
           });
 
-          // Grab the best reply (bot or strategist — any non-original reply with substance)
-          const replies = (thread.messages || []).filter(
-            (r) => r.ts !== m.ts && r.text && r.text.length > 100
+          // Only consider human replies — exclude any bot message
+          const humanReplies = (thread.messages || []).filter(
+            (r) =>
+              r.ts !== m.ts &&
+              r.text &&
+              r.text.length > 100 &&
+              r.user !== BOT_USER_ID &&
+              !(r.bot_id && r.bot_id === SELF_BOT_ID) &&
+              !r.bot_id
           );
-          if (replies.length) {
-            // Prefer bot replies, fall back to longest human reply
-            const best =
-              replies.find((r) => r.bot_id || r.user === BOT_USER_ID) ||
-              replies.sort((a, b) => b.text.length - a.text.length)[0];
+          if (humanReplies.length) {
+            // Pick the longest human reply
+            const best = humanReplies.sort((a, b) => b.text.length - a.text.length)[0];
             example.response = best.text.substring(0, 2000);
           }
         } catch {
@@ -404,14 +417,23 @@ async function fetchRecentExamples(client, channelId, currentTs) {
       if (!cursor) break;
     }
   } catch (err) {
-    console.error("Failed to fetch history:", err.message);
+    console.error("[history] Failed to fetch:", err.message);
   }
 
   // Sort newest-first, cache
   examples.sort((a, b) => parseFloat(b.ts) - parseFloat(a.ts));
   historyCache = { examples, fetchedAt: Date.now() };
 
-  return examples.filter((e) => e.ts !== currentTs).slice(0, MAX_EXAMPLES);
+  const withReplies = examples.filter((e) => e.response).length;
+  console.log(`[history] Paginated ${pagesUsed} pages, scanned ${totalScanned} messages`);
+  console.log(`[history] ${examples.length} matched as submissions, ${withReplies} with human replies`);
+
+  // Prefer examples with human replies, fill remaining slots with reply-less
+  const replied = examples.filter((e) => e.ts !== currentTs && e.response);
+  const noReply = examples.filter((e) => e.ts !== currentTs && !e.response);
+  const selected = [...replied, ...noReply].slice(0, MAX_EXAMPLES);
+
+  return selected;
 }
 
 function formatExamples(examples) {
