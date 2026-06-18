@@ -725,12 +725,21 @@ async function handleThreadFollowUp(event, client) {
       text: `:brain: Working on it...`,
     });
 
-    // 4. Build single user turn with full context
+    // 4. Fetch hotline examples (hits 60-min cache from the initial brief)
+    const examples = await fetchRecentExamples(client, HOTLINE_CHANNEL_ID, event.thread_ts);
+    const examplesBlock = formatExamples(examples);
+
+    // 5. Build single user turn with full context
     const content = [];
 
     // Reference files
     for (const ref of UPLOADED_REF_FILES) {
       content.push({ type: "input_file", file_id: ref.fileId });
+    }
+
+    // Past hotline intelligence
+    if (examplesBlock) {
+      content.push({ type: "input_text", text: examplesBlock });
     }
 
     // Structured context as one input_text block
@@ -755,7 +764,16 @@ async function handleThreadFollowUp(event, client) {
       `followUpText="${truncFollow}"`
     );
 
-    // 5. Call Grok — system + single user turn, no assistant turns
+    // Diagnostic: summarize what we're sending to Grok
+    const totalTextLen = content
+      .filter((c) => c.type === "input_text")
+      .reduce((sum, c) => sum + c.text.length, 0);
+    console.log(
+      `[grok] Sending follow-up: ${UPLOADED_REF_FILES.length} ref files, ${examples.length} examples, ` +
+      `total text=${totalTextLen} chars`
+    );
+
+    // 6. Call Grok — system + single user turn, no assistant turns
     const resp = await fetch(`${XAI_BASE}/responses`, {
       method: "POST",
       headers: xaiHeaders("application/json"),
