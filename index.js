@@ -131,8 +131,10 @@ const app = new App(appOptions);
 const HOTLINE_PATTERN = /Submit a Hotline Request/i;
 const REQUEST_ID_PATTERN = /\b[A-Z]{1,4}-\d{4,6}\b/; // SS-34277, CR-12345, etc.
 
-function isHotlineSubmission(text) {
-  return HOTLINE_PATTERN.test(text) || REQUEST_ID_PATTERN.test(text);
+function isHotlineSubmission(text, files) {
+  if (HOTLINE_PATTERN.test(text) || REQUEST_ID_PATTERN.test(text)) return true;
+  if (files && files.some(f => /client\s*brief/i.test(f.name || ""))) return true;
+  return false;
 }
 
 /* ───────────────────────────────────────────
@@ -148,7 +150,6 @@ function parseBrief(text) {
     brand: /(?:Brand|Client)[:\s]*(.+)/i,
     campaign: /(?:Campaign(?:\s*Name)?|Initiative)[:\s]*(.+)/i,
     handle: /(?:@?Handle|Twitter|X\s*Handle)[:\s]*(@?\w+)/i,
-    budget: /(?:Budget|Spend)[:\s]*(.+)/i,
     valueProp: /(?:Value\s*Prop(?:osition)?|Key\s*Message)[:\s]*(.+)/i,
     cta: /(?:CTA|Call\s*to\s*Action)[:\s]*(.+)/i,
     objective: /(?:Objective|Goal)[:\s]*(.+)/i,
@@ -161,6 +162,12 @@ function parseBrief(text) {
     const m = text.match(rx);
     if (m) fields[key] = m[1].trim();
   }
+
+  // Multi-line: capture from "Additional Information:" to next field label or end
+  const addInfoMatch = text.match(
+    /Additional\s*Information[:\s]*([\s\S]+?)(?=\n(?:Request\s*ID|Ticket|Brand|Client|Campaign|Initiative|@?Handle|Twitter|X\s*Handle|Value\s*Prop|Key\s*Message|CTA|Call\s*to\s*Action|Objective|Goal|KPI|Key\s*Performance|Success\s*Metric|Audience|Target|Timeline|Dates?|Flight)[:\s]|$)/i
+  );
+  if (addInfoMatch) fields.additionalInfo = addInfoMatch[1].trim();
 
   // Also try to grab the Request ID from the broader pattern if not caught
   if (!fields.requestId) {
@@ -186,13 +193,13 @@ function formatBrief(brief) {
     brand: "Brand",
     campaign: "Campaign",
     handle: "X Handle",
-    budget: "Budget",
     valueProp: "Value Proposition",
     cta: "CTA",
     objective: "Objective",
     kpi: "KPI",
     audience: "Target Audience",
     timeline: "Flight Dates",
+    additionalInfo: "Additional Information",
   };
 
   for (const [key, label] of Object.entries(labels)) {
@@ -232,6 +239,14 @@ function extractFiles(message) {
       });
     }
   }
+  // Diagnostic: log attachment breakdown
+  if (images.length || docs.length) {
+    const parts = [];
+    for (const img of images) parts.push(`"${img.name}" (${img.mimetype}) → image`);
+    for (const doc of docs) parts.push(`"${doc.name}" (${doc.mimetype}) → doc`);
+    console.log(`[files] ${images.length + docs.length} attachment(s): ${parts.join(", ")}`);
+  }
+
   return { images, docs };
 }
 
@@ -248,7 +263,10 @@ async function downloadAsBuffer(url, token) {
  */
 async function uploadSlackFileToXai(slackUrl, filename) {
   const buf = await downloadAsBuffer(slackUrl, SLACK_BOT_TOKEN);
-  if (!buf) return null;
+  if (!buf) {
+    console.error(`[files] FAILED to upload "${filename}": could not download from Slack`);
+    return null;
+  }
 
   const blob = new Blob([buf]);
   const form = new FormData();
@@ -261,8 +279,13 @@ async function uploadSlackFileToXai(slackUrl, filename) {
     body: form,
   });
 
-  if (!resp.ok) return null;
+  if (!resp.ok) {
+    const errText = await resp.text();
+    console.error(`[files] FAILED to upload "${filename}": ${resp.status} ${errText}`);
+    return null;
+  }
   const data = await resp.json();
+  console.log(`[files] Uploaded "${filename}" → ${data.id}`);
   return data.id;
 }
 
@@ -304,7 +327,7 @@ async function fetchRecentExamples(client, channelId, currentTs) {
       const messages = history.messages || [];
 
       for (const m of messages) {
-        if (!m.text || !isHotlineSubmission(m.text) || m.bot_id) continue;
+        if (!m.text || !isHotlineSubmission(m.text, m.files) || m.bot_id) continue;
         if (m.ts === currentTs) continue;
 
         const example = {
@@ -437,6 +460,18 @@ async function callGrok(briefText, examples, { images = [], docs = [] } = {}) {
     text: "Generate 5–7 creative concepts for this brief following every rule in your system prompt.",
   });
 
+  // Diagnostic: summarize what we're sending to Grok
+  const inputImageCount = content.filter((c) => c.type === "input_image").length;
+  const inputDocCount = docs.length;
+  const totalTextLen = content
+    .filter((c) => c.type === "input_text")
+    .reduce((sum, c) => sum + c.text.length, 0);
+  console.log(
+    `[grok] Sending: ${UPLOADED_REF_FILES.length} ref files, ${examples.length} examples, ` +
+    `${inputImageCount} image(s), ${inputDocCount} doc(s), brief=${briefText.length} chars, ` +
+    `total text=${totalTextLen} chars`
+  );
+
   // Call x.ai Responses API
   const resp = await fetch(`${XAI_BASE}/responses`, {
     method: "POST",
@@ -447,7 +482,7 @@ async function callGrok(briefText, examples, { images = [], docs = [] } = {}) {
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content },
       ],
-      max_output_tokens: 8000,
+      max_output_tokens: 16384,
       temperature: 0.85,
     }),
   });
@@ -465,6 +500,76 @@ async function callGrok(briefText, examples, { images = [], docs = [] } = {}) {
   const textBlock = (outputMsg.content || []).find((c) => c.type === "output_text");
   if (!textBlock) throw new Error("No output_text in Grok response");
   return textBlock.text;
+}
+
+/* ───────────────────────────────────────────
+   SLACK CHUNKING
+   Splits long Grok responses to stay under
+   Slack's per-message limit (~4000 chars).
+   ─────────────────────────────────────────── */
+const SLACK_MAX_CHARS = 3500;
+
+function chunkSlackResponse(text) {
+  if (text.length <= SLACK_MAX_CHARS) return [text];
+
+  const chunks = [];
+  let remaining = text;
+
+  while (remaining.length > SLACK_MAX_CHARS) {
+    const slice = remaining.substring(0, SLACK_MAX_CHARS);
+
+    // Primary: split before a *Concept N header
+    let splitIdx = -1;
+    const conceptMatch = slice.match(/[\s\S]*\n(?=\*Concept \d)/);
+    if (conceptMatch) {
+      splitIdx = conceptMatch[0].length;
+    }
+
+    // Fallback: split on ─── divider line
+    if (splitIdx <= 0) {
+      const dividerIdx = slice.lastIndexOf("\n───");
+      if (dividerIdx > 0) splitIdx = dividerIdx;
+    }
+
+    // Fallback: split on double-newline
+    if (splitIdx <= 0) {
+      const dblNewline = slice.lastIndexOf("\n\n");
+      if (dblNewline > 0) splitIdx = dblNewline;
+    }
+
+    // Last resort: split on last newline
+    if (splitIdx <= 0) {
+      const lastNl = slice.lastIndexOf("\n");
+      splitIdx = lastNl > 0 ? lastNl : SLACK_MAX_CHARS;
+    }
+
+    chunks.push(remaining.substring(0, splitIdx).trimEnd());
+    remaining = remaining.substring(splitIdx).trimStart();
+  }
+
+  if (remaining.length > 0) chunks.push(remaining);
+  return chunks;
+}
+
+async function postChunkedResponse(client, channel, threadTs, thinkingTs, fullText) {
+  const chunks = chunkSlackResponse(fullText);
+  console.log(`[slack] Response split into ${chunks.length} chunk(s), posting to thread`);
+
+  // Chunk 1: update the thinking message
+  await client.chat.update({
+    channel,
+    ts: thinkingTs,
+    text: chunks[0],
+  });
+
+  // Chunks 2+: post as sequential replies in the same thread
+  for (let i = 1; i < chunks.length; i++) {
+    await client.chat.postMessage({
+      channel,
+      thread_ts: threadTs,
+      text: chunks[i],
+    });
+  }
 }
 
 /* ───────────────────────────────────────────
@@ -492,11 +597,10 @@ async function handleMention(event, client) {
     // Run through the full Grok pipeline (system prompt + reference files + history)
     const grokResponse = await callGrok(text, [], { images, docs });
 
-    await client.chat.update({
-      channel: event.channel,
-      ts: thinking.ts,
-      text: grokResponse,
-    });
+    await postChunkedResponse(
+      client, event.channel, event.thread_ts || event.ts, thinking.ts,
+      grokResponse
+    );
   } catch (err) {
     console.error("[@mention/DM] Grok error:", err.message);
     await client.chat.postMessage({
@@ -511,6 +615,126 @@ async function handleMention(event, client) {
    MAIN MESSAGE HANDLER
    ─────────────────────────────────────────── */
 const processed = new Set(); // dedup by ts
+const activeThreads = new Set(); // thread_ts values where the bot has responded
+
+/* ───────────────────────────────────────────
+   THREAD FOLLOW-UP HANDLER (hotline only)
+   ─────────────────────────────────────────── */
+const TRANSIENT_BOT_MSG = /^:brain:|^:warning:/;
+
+async function handleThreadFollowUp(event, client) {
+  console.log(`[follow-up] Thread reply from <@${event.user}> in thread ${event.thread_ts}`);
+
+  try {
+    // 1. Fetch thread BEFORE posting thinking indicator
+    const thread = await client.conversations.replies({
+      channel: event.channel,
+      ts: event.thread_ts,
+      limit: 50,
+    });
+    const messages = (thread.messages || []).filter(
+      (m) => m.text && !TRANSIENT_BOT_MSG.test(m.text)
+    );
+
+    // 2. Separate human messages and bot responses
+    // First message is the original brief (human or Workflow)
+    const originalBrief = messages[0]?.text || "";
+    const botResponses = [];
+    const humanFollowUps = [];
+
+    for (let i = 1; i < messages.length; i++) {
+      const msg = messages[i];
+      if (msg.user === BOT_USER_ID) {
+        // Coalesce consecutive bot messages (chunked responses)
+        if (botResponses.length && messages[i - 1]?.user === BOT_USER_ID) {
+          botResponses[botResponses.length - 1] += "\n\n" + msg.text;
+        } else {
+          botResponses.push(msg.text);
+        }
+      } else {
+        humanFollowUps.push(msg.text);
+      }
+    }
+
+    // The latest human message is the follow-up request
+    const followUpText = humanFollowUps.pop() || event.text;
+
+    // 3. Now post thinking indicator (after fetch, before Grok call)
+    const thinking = await client.chat.postMessage({
+      channel: event.channel,
+      thread_ts: event.thread_ts,
+      text: `:brain: Working on it...`,
+    });
+
+    // 4. Build single user turn with full context
+    const content = [];
+
+    // Reference files
+    for (const ref of UPLOADED_REF_FILES) {
+      content.push({ type: "input_file", file_id: ref.fileId });
+    }
+
+    // Structured context as one input_text block
+    const contextParts = [`ORIGINAL BRIEF:\n${originalBrief}`];
+
+    if (botResponses.length) {
+      contextParts.push(`PREVIOUS CREATIVE IDEAS:\n${botResponses.join("\n\n---\n\n")}`);
+    }
+    if (humanFollowUps.length) {
+      contextParts.push(`PRIOR FOLLOW-UPS:\n${humanFollowUps.join("\n\n")}`);
+    }
+    contextParts.push(`FOLLOW-UP REQUEST:\n${followUpText}`);
+
+    content.push({ type: "input_text", text: contextParts.join("\n\n") });
+
+    // Diagnostic: log reconstructed context summary
+    const truncFollow = followUpText.length > 80 ? followUpText.substring(0, 80) + "..." : followUpText;
+    console.log(
+      `[follow-up] Context: originalBrief=${originalBrief.length} chars, ` +
+      `${botResponses.length} prior bot response(s), ` +
+      `${humanFollowUps.length} prior follow-up(s), ` +
+      `followUpText="${truncFollow}"`
+    );
+
+    // 5. Call Grok — system + single user turn, no assistant turns
+    const resp = await fetch(`${XAI_BASE}/responses`, {
+      method: "POST",
+      headers: xaiHeaders("application/json"),
+      body: JSON.stringify({
+        model: GROK_MODEL,
+        input: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content },
+        ],
+        max_output_tokens: 16384,
+        temperature: 0.85,
+      }),
+    });
+
+    if (!resp.ok) {
+      const errBody = await resp.text();
+      throw new Error(`Grok API ${resp.status}: ${errBody}`);
+    }
+
+    const data = await resp.json();
+    const outputMsg = (data.output || []).find((o) => o.type === "message");
+    if (!outputMsg) throw new Error("No message in Grok response");
+    const textBlock = (outputMsg.content || []).find((c) => c.type === "output_text");
+    if (!textBlock) throw new Error("No output_text in Grok response");
+
+    await postChunkedResponse(
+      client, event.channel, event.thread_ts, thinking.ts,
+      textBlock.text
+    );
+  } catch (err) {
+    console.error("[follow-up] Error:", err);
+    await client.chat.postMessage({
+      channel: event.channel,
+      thread_ts: event.thread_ts,
+      text: `:warning: Creative Botline hit an error: ${err.message}`,
+    });
+  }
+}
 
 app.event("message", async ({ event, client }) => {
   // --- Direct DMs to the bot (channel starts with D) ---
@@ -537,9 +761,16 @@ app.event("message", async ({ event, client }) => {
     return;
   }
 
+  // --- Threaded reply in an active thread → follow-up ---
+  if (event.thread_ts && event.thread_ts !== event.ts && activeThreads.has(event.thread_ts)) {
+    if (processed.has(event.ts)) return;
+    processed.add(event.ts);
+    return handleThreadFollowUp(event, client);
+  }
+
   // --- Guard: must look like a hotline submission ---
   const text = event.text || "";
-  if (!isHotlineSubmission(text)) {
+  if (!isHotlineSubmission(text, event.files)) {
     // Still handle @mention in hotline channel
     if (BOT_USER_ID && text.includes(`<@${BOT_USER_ID}>`)) {
       return handleMention(event, client);
@@ -550,12 +781,18 @@ app.event("message", async ({ event, client }) => {
   // --- Dedup ---
   if (processed.has(event.ts)) return;
   processed.add(event.ts);
-  // Keep set from growing unbounded
+  // Keep sets from growing unbounded
   if (processed.size > 500) {
     const arr = [...processed];
     arr.splice(0, 250);
     processed.clear();
     arr.forEach((t) => processed.add(t));
+  }
+  if (activeThreads.size > 1000) {
+    const arr = [...activeThreads];
+    arr.splice(0, 500);
+    activeThreads.clear();
+    arr.forEach((t) => activeThreads.add(t));
   }
 
   console.log(`[hotline] New submission detected: ${event.ts}`);
@@ -567,6 +804,15 @@ app.event("message", async ({ event, client }) => {
     const requestId = brief.parsed.requestId || "NEW";
     const campaign = brief.parsed.campaign || "Hotline Request";
     const submitter = event.user;
+
+    // Diagnostic: log parsed vs missing fields
+    const allBriefKeys = ["requestId", "brand", "campaign", "handle", "valueProp", "cta", "objective", "kpi", "audience", "timeline", "additionalInfo"];
+    const found = allBriefKeys
+      .filter((k) => brief.parsed[k])
+      .map((k) => k === "additionalInfo" ? `${k}=<${brief.parsed[k].length} chars>` : `${k}=${brief.parsed[k]}`)
+      .join(", ");
+    const missing = allBriefKeys.filter((k) => !brief.parsed[k]).join(", ");
+    console.log(`[hotline] Parsed fields: ${found || "(none)"} | missing: ${missing || "(none)"}`);
 
     // 2. Extract files (images + documents/decks)
     const { images, docs } = extractFiles(event);
@@ -593,12 +839,12 @@ app.event("message", async ({ event, client }) => {
     const header = `Creative ideas for *${requestId}* (${campaign}) from <@${submitter}>:`;
 
     // 7. Update the thinking message with the real response
-    await client.chat.update({
-      channel: event.channel,
-      ts: thinking.ts,
-      text: `${header}\n\n${grokResponse}`,
-    });
+    await postChunkedResponse(
+      client, event.channel, event.ts, thinking.ts,
+      `${header}\n\n${grokResponse}`
+    );
 
+    activeThreads.add(event.ts);
     console.log(`[hotline] Response posted for ${requestId}`);
   } catch (err) {
     console.error("[hotline] Error:", err);
