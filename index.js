@@ -18,6 +18,9 @@ const {
 
 const SOCKET_MODE = process.env.SLACK_SOCKET_MODE !== "false"; // default true
 
+// Resolved at startup via auth.test — the bot's own bot_id (distinct from BOT_USER_ID)
+let SELF_BOT_ID = null;
+
 /* ───────────────────────────────────────────
    GROK CONSTANTS
    ─────────────────────────────────────────── */
@@ -737,6 +740,8 @@ async function handleThreadFollowUp(event, client) {
 }
 
 app.event("message", async ({ event, client }) => {
+  console.log(`[debug] msg in ${event.channel} | bot_id=${event.bot_id} | subtype=${event.subtype} | user=${event.user} | bot_profile=${event.bot_profile?.name} | text=${(event.text||"").slice(0,60)}`);
+
   // --- Direct DMs to the bot (channel starts with D) ---
   if (event.channel_type === "im" || (event.channel && event.channel.startsWith("D"))) {
     if (event.bot_id) return; // skip own messages
@@ -756,8 +761,15 @@ app.event("message", async ({ event, client }) => {
     return;
   }
 
-  // --- Guard: skip bot messages, edits, deletes ---
-  if (event.bot_id || event.subtype === "message_changed" || event.subtype === "message_deleted") {
+  // --- Guard: skip edits, deletes ---
+  if (event.subtype === "message_changed" || event.subtype === "message_deleted") {
+    return;
+  }
+
+  // --- Guard: skip our own messages (prevent self-trigger loop) ---
+  // Workflow posts carry a bot_id too, so we can't blanket-drop all bot_id messages.
+  // Match on both signals: user ID (when present) and our own bot_id.
+  if (event.user === BOT_USER_ID || (event.bot_id && event.bot_id === SELF_BOT_ID)) {
     return;
   }
 
@@ -873,6 +885,15 @@ app.event("app_mention", async ({ event, client }) => {
    Upload reference files, then start listening.
    ─────────────────────────────────────────── */
 (async () => {
+  // Resolve the bot's own bot_id so we can filter self-messages reliably
+  try {
+    const auth = await app.client.auth.test({ token: SLACK_BOT_TOKEN });
+    SELF_BOT_ID = auth.bot_id;
+    console.log(`[startup] Resolved SELF_BOT_ID=${SELF_BOT_ID} (user_id=${auth.user_id})`);
+  } catch (err) {
+    console.error("[startup] auth.test failed — self-loop guard will rely on BOT_USER_ID only:", err.message);
+  }
+
   await uploadReferenceFiles();
   const port = SOCKET_MODE ? undefined : parseInt(PORT, 10);
   await app.start(port);
