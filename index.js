@@ -163,7 +163,7 @@ function parseBrief(text) {
     { key: "_budget", pattern: /budget/i },
     { key: "valueProp", pattern: /value\s*prop/i },
     { key: "objective", pattern: /want\s*people\s*to\s*do/i },
-    { key: "additionalInfo", pattern: /additional\s*info/i },
+    { key: "additionalContext", pattern: /additional\s*(?:context|info)/i },
   ];
 
   function matchLabel(line) {
@@ -236,7 +236,7 @@ function formatBrief(brief) {
     kpi: "KPI",
     audience: "Target Audience",
     timeline: "Flight Dates",
-    additionalInfo: "Additional Information",
+    additionalContext: "Additional Context",
   };
 
   for (const [key, label] of Object.entries(labels)) {
@@ -892,10 +892,10 @@ app.event("message", async ({ event, client }) => {
     const submitter = event.user;
 
     // Diagnostic: log parsed vs missing fields
-    const allBriefKeys = ["requestId", "brand", "campaign", "handle", "valueProp", "cta", "objective", "kpi", "audience", "timeline", "additionalInfo"];
+    const allBriefKeys = ["requestId", "brand", "campaign", "handle", "valueProp", "cta", "objective", "kpi", "audience", "timeline", "additionalContext"];
     const found = allBriefKeys
       .filter((k) => brief.parsed[k])
-      .map((k) => k === "additionalInfo" ? `${k}=<${brief.parsed[k].length} chars>` : `${k}=${brief.parsed[k]}`)
+      .map((k) => k === "additionalContext" ? `${k}=<${brief.parsed[k].length} chars>` : `${k}=${brief.parsed[k]}`)
       .join(", ");
     const missing = allBriefKeys.filter((k) => !brief.parsed[k]).join(", ");
     console.log(`[hotline] Parsed fields: ${found || "(none)"} | missing: ${missing || "(none)"}`);
