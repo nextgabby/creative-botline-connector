@@ -889,7 +889,6 @@ app.event("message", async ({ event, client }) => {
     const briefText = formatBrief(brief);
     const requestId = brief.parsed.requestId || "NEW";
     const campaign = brief.parsed.campaign || "Hotline Request";
-    const submitter = event.user;
 
     // Diagnostic: log parsed vs missing fields
     const allBriefKeys = ["requestId", "brand", "campaign", "handle", "valueProp", "cta", "objective", "kpi", "audience", "timeline", "additionalContext"];
@@ -922,7 +921,7 @@ app.event("message", async ({ event, client }) => {
     const grokResponse = await callGrok(briefText, examples, { images, docs });
 
     // 6. Build header
-    const header = `Creative ideas for *${requestId}* (${campaign}) from <@${submitter}>:`;
+    const header = `Creative ideas for *${requestId}* (${campaign}):`;
 
     // 7. Update the thinking message with the real response
     await postChunkedResponse(
