@@ -129,9 +129,9 @@ if (SOCKET_MODE) {
 const app = new App(appOptions);
 
 /* ───────────────────────────────────────────
-   HOTLINE DETECTION
+   BOTLINE DETECTION
    ─────────────────────────────────────────── */
-const HOTLINE_PATTERN = /Submit a Hotline Request/i;
+const HOTLINE_PATTERN = /Submit a (?:Hotline|Botline) Request/i;
 const REQUEST_ID_PATTERN = /\b[A-Z]{1,4}-\d{4,6}\b/; // SS-34277, CR-12345, etc.
 
 function isHotlineSubmission(text, files) {
@@ -329,7 +329,7 @@ async function uploadSlackFileToXai(slackUrl, filename) {
 /* ───────────────────────────────────────────
    HISTORY FETCHER
    Paginate back ~12 months to build a deep
-   set of hotline submissions + strategist
+   set of botline submissions + strategist
    replies for Grok context.
    ─────────────────────────────────────────── */
 const HISTORY_MONTHS = 12;
@@ -372,7 +372,7 @@ async function fetchRecentExamples(client, channelId, currentTs) {
         if (!m.text) continue;
         // Skip our own messages (same logic as main handler)
         if (m.user === BOT_USER_ID || (m.bot_id && m.bot_id === SELF_BOT_ID)) continue;
-        // Must look like a hotline submission
+        // Must look like a botline submission
         if (!isHotlineSubmission(m.text, m.files)) continue;
         if (m.ts === currentTs) continue;
 
@@ -440,7 +440,7 @@ function formatExamples(examples) {
   if (!examples.length) return "";
 
   const parts = [
-    "HOTLINE INTELLIGENCE — #x-creative-hotline submissions + strategist replies (last 12 months):\n",
+    "BOTLINE INTELLIGENCE — #x-creative-botline submissions + strategist replies (last 12 months):\n",
   ];
 
   for (let i = 0; i < examples.length; i++) {
@@ -478,7 +478,7 @@ async function callGrok(briefText, examples, { images = [], docs = [] } = {}) {
     });
   }
 
-  // 2. Past hotline intelligence
+  // 2. Past botline intelligence
   if (examplesBlock) {
     content.push({ type: "input_text", text: examplesBlock });
   }
@@ -634,7 +634,7 @@ async function postChunkedResponse(client, channel, threadTs, thinkingTs, fullTe
 /* ───────────────────────────────────────────
    @MENTION / DM HANDLER
    Uses the full system prompt + reference files
-   via the Responses API, same as the hotline path.
+   via the Responses API, same as the botline path.
    ─────────────────────────────────────────── */
 async function handleMention(event, client) {
   const text = (event.text || "").replace(/<@[A-Z0-9]+>/g, "").trim();
@@ -677,7 +677,7 @@ const processed = new Set(); // dedup by ts
 const activeThreads = new Set(); // thread_ts values where the bot has responded
 
 /* ───────────────────────────────────────────
-   THREAD FOLLOW-UP HANDLER (hotline only)
+   THREAD FOLLOW-UP HANDLER (botline only)
    ─────────────────────────────────────────── */
 const TRANSIENT_BOT_MSG = /^:brain:|^:warning:/;
 
@@ -725,7 +725,7 @@ async function handleThreadFollowUp(event, client) {
       text: `:brain: Working on it...`,
     });
 
-    // 4. Fetch hotline examples (hits 60-min cache from the initial brief)
+    // 4. Fetch botline examples (hits 60-min cache from the initial brief)
     const examples = await fetchRecentExamples(client, HOTLINE_CHANNEL_ID, event.thread_ts);
     const examplesBlock = formatExamples(examples);
 
@@ -737,7 +737,7 @@ async function handleThreadFollowUp(event, client) {
       content.push({ type: "input_file", file_id: ref.fileId });
     }
 
-    // Past hotline intelligence
+    // Past botline intelligence
     if (examplesBlock) {
       content.push({ type: "input_text", text: examplesBlock });
     }
@@ -822,7 +822,7 @@ app.event("message", async ({ event, client }) => {
     return handleMention(event, client);
   }
 
-  // --- Guard: only the hotline channel ---
+  // --- Guard: only the botline channel ---
   if (event.channel !== HOTLINE_CHANNEL_ID) {
     // Check for @mention in any channel
     if (
@@ -854,10 +854,10 @@ app.event("message", async ({ event, client }) => {
     return handleThreadFollowUp(event, client);
   }
 
-  // --- Guard: must look like a hotline submission ---
+  // --- Guard: must look like a botline submission ---
   const text = event.text || "";
   if (!isHotlineSubmission(text, event.files)) {
-    // Still handle @mention in hotline channel
+    // Still handle @mention in botline channel
     if (BOT_USER_ID && text.includes(`<@${BOT_USER_ID}>`)) {
       return handleMention(event, client);
     }
@@ -881,14 +881,14 @@ app.event("message", async ({ event, client }) => {
     arr.forEach((t) => activeThreads.add(t));
   }
 
-  console.log(`[hotline] New submission detected: ${event.ts}`);
+  console.log(`[botline] New submission detected: ${event.ts}`);
 
   try {
     // 1. Parse the brief
     const brief = parseBrief(text);
     const briefText = formatBrief(brief);
     const requestId = brief.parsed.requestId || "NEW";
-    const campaign = brief.parsed.campaign || "Hotline Request";
+    const campaign = brief.parsed.campaign || "Botline Request";
 
     // Diagnostic: log parsed vs missing fields
     const allBriefKeys = ["requestId", "brand", "campaign", "handle", "valueProp", "cta", "objective", "kpi", "audience", "timeline", "additionalContext"];
@@ -897,7 +897,7 @@ app.event("message", async ({ event, client }) => {
       .map((k) => k === "additionalContext" ? `${k}=<${brief.parsed[k].length} chars>` : `${k}=${brief.parsed[k]}`)
       .join(", ");
     const missing = allBriefKeys.filter((k) => !brief.parsed[k]).join(", ");
-    console.log(`[hotline] Parsed fields: ${found || "(none)"} | missing: ${missing || "(none)"}`);
+    console.log(`[botline] Parsed fields: ${found || "(none)"} | missing: ${missing || "(none)"}`);
 
     // 2. Extract files (images + documents/decks)
     const { images, docs } = extractFiles(event);
@@ -915,7 +915,7 @@ app.event("message", async ({ event, client }) => {
       HOTLINE_CHANNEL_ID,
       event.ts
     );
-    console.log(`[hotline] Fetched ${examples.length} past examples`);
+    console.log(`[botline] Fetched ${examples.length} past examples`);
 
     // 5. Call Grok
     const grokResponse = await callGrok(briefText, examples, { images, docs });
@@ -930,9 +930,9 @@ app.event("message", async ({ event, client }) => {
     );
 
     activeThreads.add(event.ts);
-    console.log(`[hotline] Response posted for ${requestId}`);
+    console.log(`[botline] Response posted for ${requestId}`);
   } catch (err) {
-    console.error("[hotline] Error:", err);
+    console.error("[botline] Error:", err);
 
     await client.chat.postMessage({
       channel: event.channel,
