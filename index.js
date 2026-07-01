@@ -917,7 +917,7 @@ async function handleThreadFollowUp(event, client) {
     const mentionsBot = mentions.includes(BOT_USER_ID);
     const mentionsHuman = mentions.some((id) => id !== BOT_USER_ID);
 
-    let intent = "more"; // default for @mention path
+    let intent = "other";
     let targetIdea = null;
 
     if (mentionsHuman && !mentionsBot) {
@@ -926,22 +926,25 @@ async function handleThreadFollowUp(event, client) {
       return;
     }
 
-    if (!mentionsBot) {
-      // No @mention of bot → classify with Grok
-      const lastBotResponse = botResponses.length ? botResponses[botResponses.length - 1] : null;
-      const classification = await classifyFollowUp(followUpText, lastBotResponse);
-      const directed = !!classification.directed_at_botline;
-      intent = classification.intent || "other";
-      targetIdea = classification.target_idea || null;
+    // Always classify intent (even on @mention — determines social/more/expand routing)
+    const lastBotResponse = botResponses.length ? botResponses[botResponses.length - 1] : null;
+    const classification = await classifyFollowUp(followUpText, lastBotResponse);
+    const directed = !!classification.directed_at_botline;
+    intent = classification.intent || "other";
+    targetIdea = classification.target_idea || null;
 
+    if (mentionsBot) {
+      // @mention guarantees a response — override directed, keep classified intent
+      console.log(
+        `[follow-up] Intent: @mentions bot, classified intent=${intent}` +
+        `${targetIdea ? ` target="${targetIdea}"` : ""} → responding`
+      );
+    } else {
       console.log(
         `[follow-up] Intent: directed=${directed} intent=${intent}` +
         `${targetIdea ? ` target="${targetIdea}"` : ""} → ${directed ? "responding" : "silent"}`
       );
-
       if (!directed) return;
-    } else {
-      console.log(`[follow-up] Intent: @mentions bot → responding (skip classifier)`);
     }
 
     // 4. Post thinking indicator (after intent gate, before Grok call)
