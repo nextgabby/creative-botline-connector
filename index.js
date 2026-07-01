@@ -681,6 +681,67 @@ const activeThreads = new Set(); // thread_ts values where the bot has responded
    ─────────────────────────────────────────── */
 const TRANSIENT_BOT_MSG = /^:brain:|^:warning:/;
 
+const CLASSIFIER_SYSTEM = `You are a message classifier for Creative Botline, an AI creative strategist in a Slack channel.
+You will receive the last bot response (truncated) and a new human reply in the thread.
+Determine whether the human is directing their message AT the botline (asking it to do something, thanking it, or asking it a question) vs. reacting to the ideas for their own team, making a decision, praising/critiquing ideas as an internal discussion, or thinking out loud.
+
+Return ONLY valid JSON, no markdown, no explanation:
+{"directed_at_botline": true or false, "intent": "more" or "expand" or "social" or "other", "target_idea": "<concept name or null>"}
+
+Rules:
+- "more" = asking for additional/new/different ideas
+- "expand" = asking to go deeper on ONE specific concept (set target_idea to the concept name)
+- "social" = a thank-you, compliment, or greeting directed at the botline itself
+- "other" = a directed question or instruction that doesn't fit the above
+- If the person is discussing ideas with their team, making a decision ("let's go with #2"), expressing a preference ("love idea 3"), or reacting without asking the bot to act, set directed_at_botline to false.
+- A thank-you TO the botline ("thanks botline!", "ty!") is social+directed. Praise OF the ideas as a team decision ("these are great, let's run with it") is NOT directed.
+- When genuinely unsure, default to directed_at_botline false. Silence is safe; @mention is always available.`;
+
+async function classifyFollowUp(replyText, lastBotResponse) {
+  const contextSnippet = lastBotResponse
+    ? lastBotResponse.substring(0, 1500)
+    : "(no prior bot response)";
+
+  const resp = await fetch(`${XAI_BASE}/responses`, {
+    method: "POST",
+    headers: xaiHeaders("application/json"),
+    body: JSON.stringify({
+      model: GROK_MODEL,
+      input: [
+        { role: "system", content: CLASSIFIER_SYSTEM },
+        {
+          role: "user",
+          content: `LAST BOT RESPONSE (truncated):\n${contextSnippet}\n\nNEW HUMAN REPLY:\n${replyText}`,
+        },
+      ],
+      max_output_tokens: 256,
+      temperature: 0.1,
+    }),
+  });
+
+  if (!resp.ok) {
+    console.error(`[follow-up] Classifier API error ${resp.status}, defaulting to silent`);
+    return { directed_at_botline: false, intent: "other", target_idea: null };
+  }
+
+  const data = await resp.json();
+  const outputMsg = (data.output || []).find((o) => o.type === "message");
+  const textBlock = outputMsg && (outputMsg.content || []).find((c) => c.type === "output_text");
+  if (!textBlock) {
+    console.error("[follow-up] Classifier returned no text, defaulting to silent");
+    return { directed_at_botline: false, intent: "other", target_idea: null };
+  }
+
+  try {
+    // Strip markdown fences if present
+    const raw = textBlock.text.replace(/```json?\s*/g, "").replace(/```/g, "").trim();
+    return JSON.parse(raw);
+  } catch {
+    console.error("[follow-up] Classifier JSON parse failed, defaulting to silent:", textBlock.text);
+    return { directed_at_botline: false, intent: "other", target_idea: null };
+  }
+}
+
 async function handleThreadFollowUp(event, client) {
   console.log(`[follow-up] Thread reply from <@${event.user}> in thread ${event.thread_ts}`);
 
@@ -718,18 +779,84 @@ async function handleThreadFollowUp(event, client) {
     // The latest human message is the follow-up request
     const followUpText = humanFollowUps.pop() || event.text;
 
-    // 3. Now post thinking indicator (after fetch, before Grok call)
+    // 3. Intent gate — decide whether to respond
+    const replyText = event.text || "";
+    const mentionPattern = /<@([A-Z0-9]+)>/g;
+    const mentions = [...replyText.matchAll(mentionPattern)].map((m) => m[1]);
+    const mentionsBot = mentions.includes(BOT_USER_ID);
+    const mentionsHuman = mentions.some((id) => id !== BOT_USER_ID);
+
+    let intent = "more"; // default for @mention path
+    let targetIdea = null;
+
+    if (mentionsHuman && !mentionsBot) {
+      // People talking to each other → stay silent
+      console.log(`[follow-up] Intent: @mentions human only → silent`);
+      return;
+    }
+
+    if (!mentionsBot) {
+      // No @mention of bot → classify with Grok
+      const lastBotResponse = botResponses.length ? botResponses[botResponses.length - 1] : null;
+      const classification = await classifyFollowUp(followUpText, lastBotResponse);
+      const directed = !!classification.directed_at_botline;
+      intent = classification.intent || "other";
+      targetIdea = classification.target_idea || null;
+
+      console.log(
+        `[follow-up] Intent: directed=${directed} intent=${intent}` +
+        `${targetIdea ? ` target="${targetIdea}"` : ""} → ${directed ? "responding" : "silent"}`
+      );
+
+      if (!directed) return;
+    } else {
+      console.log(`[follow-up] Intent: @mentions bot → responding (skip classifier)`);
+    }
+
+    // 4. Post thinking indicator (after intent gate, before Grok call)
     const thinking = await client.chat.postMessage({
       channel: event.channel,
       thread_ts: event.thread_ts,
       text: `:brain: Working on it...`,
     });
 
-    // 4. Fetch botline examples (hits 60-min cache from the initial brief)
+    // 5. Handle "social" intent — short warm reply, no concepts
+    if (intent === "social") {
+      const socialResp = await fetch(`${XAI_BASE}/responses`, {
+        method: "POST",
+        headers: xaiHeaders("application/json"),
+        body: JSON.stringify({
+          model: GROK_MODEL,
+          input: [
+            {
+              role: "system",
+              content:
+                "You are Creative Botline — a senior Creative Strategist. Reply warmly and wittily in 1-2 sentences. Do not generate new concepts or ideas. Keep it brief and human.",
+            },
+            { role: "user", content: followUpText },
+          ],
+          max_output_tokens: 256,
+          temperature: 0.85,
+        }),
+      });
+
+      if (!socialResp.ok) throw new Error(`Grok API ${socialResp.status}`);
+      const socialData = await socialResp.json();
+      const socialMsg = (socialData.output || []).find((o) => o.type === "message");
+      const socialText = socialMsg && (socialMsg.content || []).find((c) => c.type === "output_text");
+      await client.chat.update({
+        channel: event.channel,
+        ts: thinking.ts,
+        text: socialText ? socialText.text : "Anytime! :slightly_smiling_face:",
+      });
+      return;
+    }
+
+    // 6. Fetch botline examples (hits 60-min cache from the initial brief)
     const examples = await fetchRecentExamples(client, HOTLINE_CHANNEL_ID, event.thread_ts);
     const examplesBlock = formatExamples(examples);
 
-    // 5. Build single user turn with full context
+    // 7. Build single user turn with full context
     const content = [];
 
     // Reference files
@@ -748,6 +875,27 @@ async function handleThreadFollowUp(event, client) {
     if (botResponses.length) {
       contextParts.push(`PREVIOUS CREATIVE IDEAS:\n${botResponses.join("\n\n---\n\n")}`);
     }
+
+    // Intent-specific instructions
+    if (intent === "more" && botResponses.length) {
+      contextParts.push(
+        `MANDATORY — NET-NEW IDEAS ONLY:\n` +
+        `The PREVIOUS CREATIVE IDEAS above are already delivered and OFF LIMITS. ` +
+        `Do NOT repeat, rephrase, or create variations of any concept or primary tactic already used. ` +
+        `You must generate completely new concepts built on DIFFERENT primary X tactics that have not ` +
+        `appeared in this thread. Every idea must be a genuine net-new addition to the set.`
+      );
+    }
+
+    if (intent === "expand" && targetIdea) {
+      contextParts.push(
+        `EXPAND REQUEST:\n` +
+        `Take the concept "${targetIdea}" from the PREVIOUS CREATIVE IDEAS and go deeper. ` +
+        `Provide a richer, more detailed version of this ONE concept — fuller creative execution, ` +
+        `more sample creative, tactical nuance. Do not generate other concepts.`
+      );
+    }
+
     if (humanFollowUps.length) {
       contextParts.push(`PRIOR FOLLOW-UPS:\n${humanFollowUps.join("\n\n")}`);
     }
@@ -773,7 +921,7 @@ async function handleThreadFollowUp(event, client) {
       `total text=${totalTextLen} chars`
     );
 
-    // 6. Call Grok — system + single user turn, no assistant turns
+    // 8. Call Grok — system + single user turn, no assistant turns
     const resp = await fetch(`${XAI_BASE}/responses`, {
       method: "POST",
       headers: xaiHeaders("application/json"),

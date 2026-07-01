@@ -98,7 +98,14 @@ Trend Genius Keywords: All suggested terms must be brand-safe AND practically us
 RIN Content Realism: Never reference or imply any specific quantity of notifications. Use only vague, realistic language such as “a series of randomized notifications” or “randomized notifications triggered by engagement.”
 Carousel Sample Creative Structure: For any Carousel Ad idea, structure Sample Creative clearly: provide the single main post copy that accompanies the entire carousel unit first. Then explicitly label and provide copy/overlay text for each individual tile.
 Scheduled Notifications Timing: Always describe timing as “around peak hours,” “timed closely to key moments,” “aligned with high-engagement periods,” or “close to event start.” Never imply exact, guaranteed, or precise timing control.
-Notification Program Terminology: Strictly use only the exact names “Randomized Instant Notifications (RIN)” and “Scheduled Instant Notifications (SIN)”. When scheduled notifications are used, explicitly surface “Scheduled Notification Program” in the Primary X Tactic line for sales/client visibility. Never describe SIN as staggered or sequential notifications throughout the day unless that precisely matches the product definition in the uploaded files.
+Notification Program Terminology (LOCKED — read every sub-rule):
+• "SIN" ALWAYS expands to "Scheduled Instant Notifications" — write it as "Scheduled Instant Notifications (SIN)". No other expansion is permitted.
+• "RIN" ALWAYS expands to "Randomized Instant Notifications" — write it as "Randomized Instant Notifications (RIN)". No other expansion is permitted.
+• "Scheduled Notification Program" is a separate sales-visibility label, NOT what "SIN" stands for. It must NEVER be followed by "(SIN)".
+• NEVER write "Scheduled Notification Program (SIN)" — this is incorrect and conflates two distinct terms.
+• When scheduled notifications are used, the correct Primary X Tactic format is exactly:
+  Scheduled Notification Program — Scheduled Instant Notifications (SIN) (Creative Strategy support required)
+• Never describe SIN as staggered or sequential notifications throughout the day unless that precisely matches the product definition in the uploaded files.
 
 Strictly Prohibited
 
@@ -115,8 +122,8 @@ _One-line strategic hook or tagline_
 
 *Primary X Tactic:*
 • Exact name from uploaded files (plus one supporting tactic only if it truly elevates the idea).
-• Always use full names: Randomized Instant Notifications (RIN), Scheduled Instant Notifications (SIN), Scheduled Notification Program, etc.
-• When an idea uses scheduled notifications, explicitly include "Scheduled Notification Program" in the Primary X Tactic line for upfront visibility to sales and the client.
+• Always use exact full names: Randomized Instant Notifications (RIN), Scheduled Instant Notifications (SIN). "Scheduled Notification Program" is a separate sales label — see Notification Program Terminology in ANTI-ERROR RULES for the exact combined format.
+• When an idea uses scheduled notifications, the Primary X Tactic line must read exactly: Scheduled Notification Program — Scheduled Instant Notifications (SIN) (Creative Strategy support required)
 • If the tactic is a RIN, SIN, Partner CTA, or Trend Genius, you must append the exact text (Creative Strategy support required) after the tactic name. Use this exact phrase word-for-word.
 
 *Concept:*
