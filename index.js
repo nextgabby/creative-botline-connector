@@ -1100,12 +1100,14 @@ app.event("message", async ({ event, client }) => {
 
   // --- Guard: only the botline channel ---
   if (event.channel !== HOTLINE_CHANNEL_ID) {
-    // Check for @mention in any channel
+    // Check for @mention in any non-hotline channel
     if (
       BOT_USER_ID &&
       event.text &&
       event.text.includes(`<@${BOT_USER_ID}>`)
     ) {
+      if (processed.has(event.ts)) return;
+      processed.add(event.ts);
       return handleMention(event, client);
     }
     return;
@@ -1123,18 +1125,26 @@ app.event("message", async ({ event, client }) => {
     return;
   }
 
-  // --- Threaded reply in an active thread → follow-up ---
-  if (event.thread_ts && event.thread_ts !== event.ts && activeThreads.has(event.thread_ts)) {
+  // --- Threaded reply in hotline channel → follow-up ---
+  // Routes to handleThreadFollowUp if EITHER the thread is tracked (activeThreads)
+  // OR the message @mentions the bot. @mention-in-thread always gets follow-up
+  // routing (with classifier) regardless of activeThreads state.
+  const isThreadReply = event.thread_ts && event.thread_ts !== event.ts;
+  const text = event.text || "";
+  const mentionsBotInline = BOT_USER_ID && text.includes(`<@${BOT_USER_ID}>`);
+
+  if (isThreadReply && (activeThreads.has(event.thread_ts) || mentionsBotInline)) {
     if (processed.has(event.ts)) return;
     processed.add(event.ts);
     return handleThreadFollowUp(event, client);
   }
 
   // --- Guard: must look like a botline submission ---
-  const text = event.text || "";
   if (!isHotlineSubmission(text, event.files)) {
-    // Still handle @mention in botline channel
-    if (BOT_USER_ID && text.includes(`<@${BOT_USER_ID}>`)) {
+    // Handle @mention in botline channel (top-level only — threaded @mentions handled above)
+    if (mentionsBotInline) {
+      if (processed.has(event.ts)) return;
+      processed.add(event.ts);
       return handleMention(event, client);
     }
     return;
