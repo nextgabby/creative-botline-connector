@@ -327,6 +327,160 @@ async function uploadSlackFileToXai(slackUrl, filename) {
 }
 
 /* ───────────────────────────────────────────
+   GROK REQUEST WITH FILE-INGEST RETRY
+   If a reference file_id fails to ingest,
+   strip it, re-upload in background, retry once.
+   ─────────────────────────────────────────── */
+
+/**
+ * Extract a failed file_id from a Grok 400 error body.
+ */
+function extractFailedFileId(errBody) {
+  const match = errBody.match(
+    /failed to ingest file_id via media service:\s*(file_[a-zA-Z0-9_-]+)/i
+  );
+  return match ? match[1] : null;
+}
+
+/**
+ * Re-upload a reference file whose file_id has gone stale.
+ * Updates UPLOADED_REF_FILES in place if successful.
+ */
+async function refreshReferenceFile(staleFileId) {
+  const refIdx = UPLOADED_REF_FILES.findIndex((r) => r.fileId === staleFileId);
+  if (refIdx === -1) {
+    console.warn(`[files] Stale file_id ${staleFileId} not in UPLOADED_REF_FILES — cannot refresh`);
+    return null;
+  }
+
+  const refName = UPLOADED_REF_FILES[refIdx].name;
+  const local = LOCAL_REF_FILES.find((l) => l.name === refName);
+  if (!local) {
+    console.warn(`[files] No local file for "${refName}" — cannot refresh`);
+    return null;
+  }
+
+  console.log(`[files] Re-uploading ${refName} (stale file_id: ${staleFileId})`);
+  try {
+    const buf = readFileSync(local.path);
+    const blob = new Blob([buf]);
+    const form = new FormData();
+    form.append("file", blob, local.name);
+    form.append("purpose", "assistants");
+
+    const resp = await fetch(`${XAI_BASE}/files`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${XAI_API_KEY}` },
+      body: form,
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text();
+      console.error(`[files] Re-upload failed for ${refName}: ${resp.status} ${errText}`);
+      return null;
+    }
+
+    const data = await resp.json();
+    UPLOADED_REF_FILES[refIdx].fileId = data.id;
+    console.log(`[files] Refreshed ${refName} → ${data.id} (replaced ${staleFileId})`);
+    return data.id;
+  } catch (err) {
+    console.error(`[files] Re-upload error for ${refName}:`, err.message);
+    return null;
+  }
+}
+
+/**
+ * Send a request to Grok /responses with automatic retry on file-ingest errors.
+ * On retry: strips the bad file_id, kicks off a background re-upload, retries once.
+ */
+async function sendGrokRequest(input, { max_output_tokens = 16384, temperature = 0.85 } = {}) {
+  const MAX_FILE_RETRIES = 3;
+
+  const doFetch = (payload) =>
+    fetch(`${XAI_BASE}/responses`, {
+      method: "POST",
+      headers: xaiHeaders("application/json"),
+      body: JSON.stringify({
+        model: GROK_MODEL,
+        input: payload,
+        max_output_tokens,
+        temperature,
+      }),
+    });
+
+  let resp = await doFetch(input);
+  let retries = 0;
+
+  while (resp.status === 400 && retries < MAX_FILE_RETRIES) {
+    const errBody = await resp.text();
+    const badFileId = extractFailedFileId(errBody);
+
+    if (!badFileId) {
+      // Not a file-ingest error — throw immediately, don't mask real 400s
+      throw new Error(`Grok API 400: ${errBody}`);
+    }
+
+    // Count how many entries match before stripping
+    let stripped = 0;
+    for (const msg of input) {
+      if (Array.isArray(msg.content)) {
+        const before = msg.content.length;
+        msg.content = msg.content.filter(
+          (c) => !(c.type === "input_file" && c.file_id === badFileId)
+        );
+        stripped += before - msg.content.length;
+      }
+    }
+
+    if (stripped === 0) {
+      // Error names a file_id not in our content — retrying would loop forever
+      console.warn(`[grok] File ${badFileId} not in content array — cannot strip, degrading to no ref files`);
+      break;
+    }
+
+    retries++;
+    console.warn(`[grok] Stripped bad file_id ${badFileId}, retrying (attempt ${retries}/${MAX_FILE_RETRIES})`);
+
+    // Re-upload in background so future calls get a fresh file_id
+    refreshReferenceFile(badFileId).catch(() => {});
+
+    resp = await doFetch(input);
+  }
+
+  // Exhausted retries, or broke out due to unstrippable file — degrade to no ref files
+  if (resp.status === 400) {
+    const errBody = await resp.text();
+    const badFileId = extractFailedFileId(errBody);
+
+    if (badFileId) {
+      console.warn(`[grok] Retries exhausted — stripping ALL reference files and retrying without them`);
+      for (const msg of input) {
+        if (Array.isArray(msg.content)) {
+          msg.content = msg.content.filter((c) => c.type !== "input_file");
+        }
+      }
+      resp = await doFetch(input);
+    }
+
+    if (!resp.ok) {
+      const finalErr = await resp.text();
+      throw new Error(`Grok API ${resp.status}: ${finalErr}`);
+    }
+  } else if (!resp.ok) {
+    const errBody = await resp.text();
+    throw new Error(`Grok API ${resp.status}: ${errBody}`);
+  }
+
+  const data = await resp.json();
+  const outputMsg = (data.output || []).find((o) => o.type === "message");
+  if (!outputMsg) throw new Error("No message in Grok response");
+  const textBlock = (outputMsg.content || []).find((c) => c.type === "output_text");
+  if (!textBlock) throw new Error("No output_text in Grok response");
+  return textBlock.text;
+}
+
+/* ───────────────────────────────────────────
    HISTORY FETCHER
    Paginate back ~12 months to build a deep
    set of botline submissions + strategist
@@ -531,34 +685,11 @@ async function callGrok(briefText, examples, { images = [], docs = [] } = {}) {
     `total text=${totalTextLen} chars`
   );
 
-  // Call x.ai Responses API
-  const resp = await fetch(`${XAI_BASE}/responses`, {
-    method: "POST",
-    headers: xaiHeaders("application/json"),
-    body: JSON.stringify({
-      model: GROK_MODEL,
-      input: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content },
-      ],
-      max_output_tokens: 16384,
-      temperature: 0.85,
-    }),
-  });
-
-  if (!resp.ok) {
-    const errBody = await resp.text();
-    throw new Error(`Grok API ${resp.status}: ${errBody}`);
-  }
-
-  const data = await resp.json();
-
-  // Extract text from the response output
-  const outputMsg = (data.output || []).find((o) => o.type === "message");
-  if (!outputMsg) throw new Error("No message in Grok response");
-  const textBlock = (outputMsg.content || []).find((c) => c.type === "output_text");
-  if (!textBlock) throw new Error("No output_text in Grok response");
-  return textBlock.text;
+  // Call x.ai Responses API (with file-ingest retry)
+  return sendGrokRequest([
+    { role: "system", content: SYSTEM_PROMPT },
+    { role: "user", content },
+  ]);
 }
 
 /* ───────────────────────────────────────────
@@ -896,6 +1027,20 @@ async function handleThreadFollowUp(event, client) {
       );
     }
 
+    // Follow-up override: honor user's count and tactic constraints
+    contextParts.push(
+      `FOLLOW-UP OVERRIDE (applies to this response only — supersedes system prompt where they conflict):\n` +
+      `This is a follow-up request, not an initial brief. Read the FOLLOW-UP REQUEST below carefully and honor it exactly:\n` +
+      `- If the user specifies a NUMBER of ideas (e.g. "give me 2 more", "one more idea", "3 ideas"), ` +
+      `generate exactly that number. Do NOT default to 5–7.\n` +
+      `- If the user specifies a FORMAT or TACTIC (e.g. "vertical video", "RIN", "carousel", "thread"), ` +
+      `every idea in this response must use that format/tactic. The "one idea per distinct primary tactic" rule does not apply.\n` +
+      `- If the user specifies BOTH a count and a tactic, honor both.\n` +
+      `- If the user does NOT specify a count, generate 5–7 ideas as usual.\n` +
+      `- If the user does NOT specify a tactic, use a diverse mix as usual.\n` +
+      `All other creative rules (output format, concept naming, no hashtags, no demographic targeting, product accuracy) still apply.`
+    );
+
     if (humanFollowUps.length) {
       contextParts.push(`PRIOR FOLLOW-UPS:\n${humanFollowUps.join("\n\n")}`);
     }
@@ -921,35 +1066,15 @@ async function handleThreadFollowUp(event, client) {
       `total text=${totalTextLen} chars`
     );
 
-    // 8. Call Grok — system + single user turn, no assistant turns
-    const resp = await fetch(`${XAI_BASE}/responses`, {
-      method: "POST",
-      headers: xaiHeaders("application/json"),
-      body: JSON.stringify({
-        model: GROK_MODEL,
-        input: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content },
-        ],
-        max_output_tokens: 16384,
-        temperature: 0.85,
-      }),
-    });
-
-    if (!resp.ok) {
-      const errBody = await resp.text();
-      throw new Error(`Grok API ${resp.status}: ${errBody}`);
-    }
-
-    const data = await resp.json();
-    const outputMsg = (data.output || []).find((o) => o.type === "message");
-    if (!outputMsg) throw new Error("No message in Grok response");
-    const textBlock = (outputMsg.content || []).find((c) => c.type === "output_text");
-    if (!textBlock) throw new Error("No output_text in Grok response");
+    // 8. Call Grok — system + single user turn (with file-ingest retry)
+    const grokText = await sendGrokRequest([
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content },
+    ]);
 
     await postChunkedResponse(
       client, event.channel, event.thread_ts, thinking.ts,
-      textBlock.text
+      grokText
     );
   } catch (err) {
     console.error("[follow-up] Error:", err);
