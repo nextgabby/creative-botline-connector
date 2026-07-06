@@ -1084,7 +1084,8 @@ async function handleThreadFollowUp(event, client) {
     await client.chat.postMessage({
       channel: event.channel,
       thread_ts: event.thread_ts,
-      text: `:warning: Creative Botline hit an error: ${err.message}`,
+      text: `:warning: Creative Botline is having technical issues. Please wait and respond - @CreativeBotline try again - in a moment.`,
+      // text: `:warning: Creative Botline hit an error: ${err.message}`,
     });
   }
 }
@@ -1223,7 +1224,8 @@ app.event("message", async ({ event, client }) => {
     await client.chat.postMessage({
       channel: event.channel,
       thread_ts: event.ts,
-      text: `:warning: Creative Botline hit an error: ${err.message}`,
+      text: `:warning: Creative Botline is having technical issues. Please wait and respond - @CreativeBotline try again - in a moment.`,
+      // text: `:warning: Creative Botline hit an error: ${err.message}`,
     });
   }
 });
