@@ -63,8 +63,11 @@ cp .env.example .env
 ```
 
 Fill in all values. To find your `BOT_USER_ID`, check the bot's profile in Slack
-or call `auth.test` in the Slack API tester. To find `HOTLINE_CHANNEL_ID`, right-click
-the channel name in Slack > "Copy link" > the ID is the last segment.
+or call `auth.test` in the Slack API tester. To find channel IDs for
+`HOTLINE_CHANNEL_IDS`, right-click each channel name in Slack > "Copy link" >
+the ID is the last segment. List the original botline channel first — history
+and examples are always loaded from that first ID. Additional IDs only enable
+auto-listen for new submissions (invite the bot to each channel).
 
 ### 3. Install & Run
 

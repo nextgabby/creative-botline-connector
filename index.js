@@ -11,10 +11,23 @@ const {
   SLACK_APP_TOKEN,
   SLACK_SIGNING_SECRET,
   XAI_API_KEY,
-  HOTLINE_CHANNEL_ID,
   BOT_USER_ID,
   PORT = "3000",
 } = process.env;
+
+// Botline channels that auto-trigger on submissions.
+// Prefer HOTLINE_CHANNEL_IDS (comma-separated); fall back to single HOTLINE_CHANNEL_ID.
+// First ID is the original botline channel and is always used for history/examples.
+const HOTLINE_CHANNEL_IDS = (
+  process.env.HOTLINE_CHANNEL_IDS ||
+  process.env.HOTLINE_CHANNEL_ID ||
+  ""
+)
+  .split(",")
+  .map((id) => id.trim())
+  .filter(Boolean);
+const HOTLINE_CHANNELS = new Set(HOTLINE_CHANNEL_IDS);
+const HISTORY_CHANNEL_ID = HOTLINE_CHANNEL_IDS[0] || null;
 
 const SOCKET_MODE = process.env.SLACK_SOCKET_MODE !== "false"; // default true
 
@@ -987,7 +1000,7 @@ async function handleThreadFollowUp(event, client) {
     }
 
     // 6. Fetch botline examples (hits 60-min cache from the initial brief)
-    const examples = await fetchRecentExamples(client, HOTLINE_CHANNEL_ID, event.thread_ts);
+    const examples = await fetchRecentExamples(client, HISTORY_CHANNEL_ID, event.thread_ts);
     const examplesBlock = formatExamples(examples);
 
     // 7. Build single user turn with full context
@@ -1099,8 +1112,8 @@ app.event("message", async ({ event, client }) => {
     return handleMention(event, client);
   }
 
-  // --- Guard: only the botline channel ---
-  if (event.channel !== HOTLINE_CHANNEL_ID) {
+  // --- Guard: only configured botline channels ---
+  if (!HOTLINE_CHANNELS.has(event.channel)) {
     // Check for @mention in any non-hotline channel
     if (
       BOT_USER_ID &&
@@ -1197,9 +1210,10 @@ app.event("message", async ({ event, client }) => {
     });
 
     // 4. Fetch recent examples for context (up to 12 months)
+    // Always from the original botline channel (first HOTLINE_CHANNEL_IDS entry)
     const examples = await fetchRecentExamples(
       client,
-      HOTLINE_CHANNEL_ID,
+      HISTORY_CHANNEL_ID,
       event.ts
     );
     console.log(`[botline] Fetched ${examples.length} past examples`);
@@ -1260,5 +1274,8 @@ app.event("app_mention", async ({ event, client }) => {
   await app.start(port);
   console.log(
     `Creative Botline is running (${SOCKET_MODE ? "Socket Mode" : `HTTP :${PORT}`})`
+  );
+  console.log(
+    `[startup] Hotline channels: ${[...HOTLINE_CHANNELS].join(", ") || "(none)"} | history from: ${HISTORY_CHANNEL_ID || "(none)"}`
   );
 })();
