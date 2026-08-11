@@ -119,4 +119,4 @@ The bot replies in-thread with a concise creative response.
 - **Files**: Images are downloaded from Slack, base64-encoded, and sent to Grok as `image_url` content blocks. Text-based documents (PDFs, decks) are downloaded and extracted as text.
 - **History**: Paginates `conversations.history` back 12 months (up to 50 pages of 200 messages), filters for botline submissions, fetches human strategist thread replies via `conversations.replies`, caches results for 60 minutes. Up to 25 past examples are sent to Grok as "Botline Intelligence."
 - **Dedup**: In-memory Set of processed `ts` values (capped at 500) to avoid re-processing
-- **Grok**: System prompt is sent verbatim from `system-prompt.txt`. Past examples + new brief + attachments go in the user message. Model: `grok-4.3-latest`, max 8000 tokens, temperature 0.85.
+- **Grok**: System prompt is sent verbatim from `system-prompt.txt`. Past examples + new brief + attachments go in the user message. Model: `grok-4.3-latest`, max 8000 tokens, temperature 0.72.

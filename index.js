@@ -407,7 +407,7 @@ async function refreshReferenceFile(staleFileId) {
  * Send a request to Grok /responses with automatic retry on file-ingest errors.
  * On retry: strips the bad file_id, kicks off a background re-upload, retries once.
  */
-async function sendGrokRequest(input, { max_output_tokens = 16384, temperature = 0.85 } = {}) {
+async function sendGrokRequest(input, { max_output_tokens = 16384, temperature = 0.72 } = {}) {
   const MAX_FILE_RETRIES = 3;
 
   const doFetch = (payload) =>
@@ -683,7 +683,11 @@ async function callGrok(briefText, examples, { images = [], docs = [] } = {}) {
 
   content.push({
     type: "input_text",
-    text: "Generate 5–7 creative concepts for this brief following every rule in your system prompt.",
+    text:
+      "Generate 5–7 creative concepts for this brief following every rule in your system prompt. " +
+      "Every concept must pass Brand World Fidelity and the Quality Bar. " +
+      "Clever and feed-stopping means brand-true insight — never abstract, spooky, or Lynchian when the brand world is warm/playful/nostalgic. " +
+      "Never pitch Follower Ads or Collection Ads.",
   });
 
   // Diagnostic: summarize what we're sending to Grok
@@ -830,13 +834,19 @@ You will receive the last bot response (truncated) and a new human reply in the 
 Determine whether the human is directing their message AT the botline (asking it to do something, thanking it, or asking it a question) vs. reacting to the ideas for their own team, making a decision, praising/critiquing ideas as an internal discussion, or thinking out loud.
 
 Return ONLY valid JSON, no markdown, no explanation:
-{"directed_at_botline": true or false, "intent": "more" or "expand" or "social" or "other", "target_idea": "<concept name or null>"}
+{"directed_at_botline": true or false, "intent": "more" or "revise" or "expand" or "social" or "chat" or "other", "target_idea": "<concept name or null>", "critique": "<short summary of what they disliked or want fixed, or null>"}
 
 Rules:
-- "more" = asking for additional/new/different ideas
+- "more" = explicitly asking for additional/new/different creative concepts/ideas (e.g. "give me more ideas", "another round"). No strong critique required.
+- "revise" = critiquing prior ideas AND wanting a replacement set of better concepts (e.g. "these don't make sense, give me better ones", "make them good", "try again"). Fill "critique" with the key complaints. Must imply they want NEW ideas, not just an explanation.
 - "expand" = asking to go deeper on ONE specific concept (set target_idea to the concept name)
-- "social" = a thank-you, compliment, or greeting directed at the botline itself
-- "other" = a directed question or instruction that doesn't fit the above
+- "social" = a pure thank-you, compliment, greeting, or light banter directed at the botline with NO request to regenerate and NO substantive question that needs answering (e.g. "thanks!", "YOU are it!!")
+- "chat" = asking a question ABOUT prior ideas, process, or reasoning — wants an explanation or conversation, NOT a new concept dump. Examples: "what were you thinking?", "what was going on with those spooky ideas?", "why did you suggest X?", "explain Concept 2", "how does RIN work?". Fill "critique" if they also name what was wrong, but do NOT treat explanation requests as revise.
+- "other" = a directed instruction that doesn't fit the above (rare). Prefer "chat" for questions.
+- CRITICAL: Quoting or naming bad concepts while asking "what/why/how were you thinking" = "chat", NOT "revise" or "more". Only "revise" if they clearly want new ideas generated.
+- If the message BOTH critiques ideas AND asks for more/better ideas, prefer "revise" over "chat" or "social".
+- Sarcastic praise of bad ideas ("bold", "Lynchian", "I admire that") with no ask for new ideas = "chat" or "social". With an ask for new ideas = "revise".
+- Addressing the bot as "Grok", "botline", "CreativeBotline", or "you" (when clearly the bot) counts as directed even without an @mention.
 - If the person is discussing ideas with their team, making a decision ("let's go with #2"), expressing a preference ("love idea 3"), or reacting without asking the bot to act, set directed_at_botline to false.
 - A thank-you TO the botline ("thanks botline!", "ty!") is social+directed. Praise OF the ideas as a team decision ("these are great, let's run with it") is NOT directed.
 - When genuinely unsure, default to directed_at_botline false. Silence is safe; @mention is always available.`;
@@ -865,7 +875,7 @@ async function classifyFollowUp(replyText, lastBotResponse) {
 
   if (!resp.ok) {
     console.error(`[follow-up] Classifier API error ${resp.status}, defaulting to silent`);
-    return { directed_at_botline: false, intent: "other", target_idea: null };
+    return { directed_at_botline: false, intent: "other", target_idea: null, critique: null };
   }
 
   const data = await resp.json();
@@ -873,7 +883,7 @@ async function classifyFollowUp(replyText, lastBotResponse) {
   const textBlock = outputMsg && (outputMsg.content || []).find((c) => c.type === "output_text");
   if (!textBlock) {
     console.error("[follow-up] Classifier returned no text, defaulting to silent");
-    return { directed_at_botline: false, intent: "other", target_idea: null };
+    return { directed_at_botline: false, intent: "other", target_idea: null, critique: null };
   }
 
   try {
@@ -882,7 +892,7 @@ async function classifyFollowUp(replyText, lastBotResponse) {
     return JSON.parse(raw);
   } catch {
     console.error("[follow-up] Classifier JSON parse failed, defaulting to silent:", textBlock.text);
-    return { directed_at_botline: false, intent: "other", target_idea: null };
+    return { directed_at_botline: false, intent: "other", target_idea: null, critique: null };
   }
 }
 
@@ -932,6 +942,7 @@ async function handleThreadFollowUp(event, client) {
 
     let intent = "other";
     let targetIdea = null;
+    let critique = null;
 
     if (mentionsHuman && !mentionsBot) {
       // People talking to each other → stay silent
@@ -939,23 +950,26 @@ async function handleThreadFollowUp(event, client) {
       return;
     }
 
-    // Always classify intent (even on @mention — determines social/more/expand routing)
+    // Always classify intent (even on @mention — determines social/more/revise/expand routing)
     const lastBotResponse = botResponses.length ? botResponses[botResponses.length - 1] : null;
     const classification = await classifyFollowUp(followUpText, lastBotResponse);
     const directed = !!classification.directed_at_botline;
     intent = classification.intent || "other";
     targetIdea = classification.target_idea || null;
+    critique = classification.critique || null;
 
     if (mentionsBot) {
       // @mention guarantees a response — override directed, keep classified intent
       console.log(
         `[follow-up] Intent: @mentions bot, classified intent=${intent}` +
-        `${targetIdea ? ` target="${targetIdea}"` : ""} → responding`
+        `${targetIdea ? ` target="${targetIdea}"` : ""}` +
+        `${critique ? ` critique="${String(critique).slice(0, 80)}"` : ""} → responding`
       );
     } else {
       console.log(
         `[follow-up] Intent: directed=${directed} intent=${intent}` +
-        `${targetIdea ? ` target="${targetIdea}"` : ""} → ${directed ? "responding" : "silent"}`
+        `${targetIdea ? ` target="${targetIdea}"` : ""}` +
+        `${critique ? ` critique="${String(critique).slice(0, 80)}"` : ""} → ${directed ? "responding" : "silent"}`
       );
       if (!directed) return;
     }
@@ -967,34 +981,57 @@ async function handleThreadFollowUp(event, client) {
       text: `:brain: Working on it...`,
     });
 
-    // 5. Handle "social" intent — short warm reply, no concepts
-    if (intent === "social") {
-      const socialResp = await fetch(`${XAI_BASE}/responses`, {
+    // 5. Handle "social" / "chat" / non-regen "other" — conversational reply, NO concepts
+    if (intent === "social" || intent === "chat" || intent === "other") {
+      const priorIdeasSnippet = botResponses.length
+        ? botResponses[botResponses.length - 1].substring(0, 3500)
+        : "(no prior concepts in this thread)";
+      const isSocial = intent === "social";
+      const chatSystem = isSocial
+        ? "You are Creative Botline — a senior Creative Strategist on Slack. Reply warmly and wittily in 1-2 sentences. You are the bot (sometimes called Grok / Botline / \"it\"). Do not generate new concepts or ideas. Keep it brief and human."
+        : `You are Creative Botline — a senior Creative Strategist on Slack. The human is asking a question about prior ideas or process — answer it conversationally.
+
+Rules:
+- Answer the question directly. Be honest, self-aware, and concise (2–6 sentences unless they need a bit more).
+- If they ask what you were thinking / why ideas were off-tone or spooky, explain the likely miss plainly (e.g. over-indexed on "clever/feed-stopping" and drifted into abstract/surreal territory instead of staying in the brand world) and own it.
+- Do NOT generate a new set of creative concepts. Do NOT use the Concept 1 / Primary X Tactic output format.
+- Do NOT append the Creative Strategy support closing note.
+- If they also want new ideas, invite them to ask for another round — but do not generate them in this reply.
+- You are the bot (Grok / Botline). Stay client-facing and professional, with light wit when it fits.`;
+
+      const chatUser = isSocial
+        ? followUpText
+        : `ORIGINAL BRIEF (context):\n${originalBrief.substring(0, 2000)}\n\n` +
+          `PRIOR CONCEPTS (truncated):\n${priorIdeasSnippet}\n\n` +
+          (critique ? `NOTED CRITIQUE:\n${critique}\n\n` : "") +
+          `HUMAN QUESTION:\n${followUpText}`;
+
+      const chatResp = await fetch(`${XAI_BASE}/responses`, {
         method: "POST",
         headers: xaiHeaders("application/json"),
         body: JSON.stringify({
           model: GROK_MODEL,
           input: [
-            {
-              role: "system",
-              content:
-                "You are Creative Botline — a senior Creative Strategist. Reply warmly and wittily in 1-2 sentences. Do not generate new concepts or ideas. Keep it brief and human.",
-            },
-            { role: "user", content: followUpText },
+            { role: "system", content: chatSystem },
+            { role: "user", content: chatUser },
           ],
-          max_output_tokens: 256,
-          temperature: 0.85,
+          max_output_tokens: isSocial ? 256 : 800,
+          temperature: 0.7,
         }),
       });
 
-      if (!socialResp.ok) throw new Error(`Grok API ${socialResp.status}`);
-      const socialData = await socialResp.json();
-      const socialMsg = (socialData.output || []).find((o) => o.type === "message");
-      const socialText = socialMsg && (socialMsg.content || []).find((c) => c.type === "output_text");
+      if (!chatResp.ok) throw new Error(`Grok API ${chatResp.status}`);
+      const chatData = await chatResp.json();
+      const chatMsg = (chatData.output || []).find((o) => o.type === "message");
+      const chatText = chatMsg && (chatMsg.content || []).find((c) => c.type === "output_text");
       await client.chat.update({
         channel: event.channel,
         ts: thinking.ts,
-        text: socialText ? socialText.text : "Anytime! :slightly_smiling_face:",
+        text: chatText
+          ? chatText.text
+          : isSocial
+            ? "Anytime! :slightly_smiling_face:"
+            : "Fair question — I overreached on those. Want me to take another pass?",
       });
       return;
     }
@@ -1030,7 +1067,26 @@ async function handleThreadFollowUp(event, client) {
         `The PREVIOUS CREATIVE IDEAS above are already delivered and OFF LIMITS. ` +
         `Do NOT repeat, rephrase, or create variations of any concept or primary tactic already used. ` +
         `You must generate completely new concepts built on DIFFERENT primary X tactics that have not ` +
-        `appeared in this thread. Every idea must be a genuine net-new addition to the set.`
+        `appeared in this thread. Every idea must be a genuine net-new addition to the set. ` +
+        `Raise the quality bar: brand-world fidelity first, then cleverness. Do not drift into abstract, ` +
+        `spooky, Lynchian, or brand-agnostic concepts to force novelty.`
+      );
+    }
+
+    if (intent === "revise" && botResponses.length) {
+      contextParts.push(
+        `MANDATORY — REVISE AFTER CRITIQUE:\n` +
+        `Prior ideas missed the mark. Generate a replacement set that fixes the feedback.\n` +
+        `Critique to honor: ${critique || followUpText}\n` +
+        `Rules for this revision:\n` +
+        `- Stay locked to the ORIGINAL BRIEF brand/IP/campaign world. Every concept must name or clearly use those elements.\n` +
+        `- Do NOT recycle the rejected concepts, even with new titles.\n` +
+        `- Do NOT "fix" quality problems by going more abstract, uncanny, dreamlike, or avant-garde.\n` +
+        `- Clever = sharp cultural insight + brand-true twist + platform-native mechanic. Not surrealism.\n` +
+        `- Prefer currently available standard tactics. Never pitch Follower Ads or Collection Ads.\n` +
+        `- If prior ideas were too generic (product grids / chase videos), invent a stronger hook inside the brand world.\n` +
+        `- If prior ideas were off-tone for the brand, match the brand's emotional register exactly.\n` +
+        `- Different primary tactics across the set are good, but only when they fit — never force a tactic that doesn't serve the brief.`
       );
     }
 
@@ -1039,7 +1095,8 @@ async function handleThreadFollowUp(event, client) {
         `EXPAND REQUEST:\n` +
         `Take the concept "${targetIdea}" from the PREVIOUS CREATIVE IDEAS and go deeper. ` +
         `Provide a richer, more detailed version of this ONE concept — fuller creative execution, ` +
-        `more sample creative, tactical nuance. Do not generate other concepts.`
+        `more sample creative, tactical nuance. Do not generate other concepts. ` +
+        `Keep it firmly inside the brand world from the ORIGINAL BRIEF.`
       );
     }
 
@@ -1054,6 +1111,7 @@ async function handleThreadFollowUp(event, client) {
       `- If the user specifies BOTH a count and a tactic, honor both.\n` +
       `- If the user does NOT specify a count, generate 5–7 ideas as usual.\n` +
       `- If the user does NOT specify a tactic, use a diverse mix as usual.\n` +
+      `- Brand World Fidelity, Quality Bar, DEPRECATED PRODUCTS, and tone-match rules from the system prompt ALWAYS apply — they are never overridden.\n` +
       `All other creative rules (output format, concept naming, no hashtags, no demographic targeting, product accuracy) still apply.`
     );
 
