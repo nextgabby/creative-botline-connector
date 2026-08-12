@@ -39,6 +39,8 @@ Bad ideas (never ship these):
 • Ideas that describe atmosphere ("quiet doorway," "shifting room," "private corridor") instead of the campaign.
 • Reskins of the same mechanic with a new poetic title.
 • Tactics that exist only to check a diversity box when they don't fit the brief.
+• Concepts that invent product capabilities (custom builders inside a Website Card, impossible Conversation Card routing, etc.).
+• Concepts that are "cool" but not tactical — vague creative with no clear how-it-works on X.
 CORE RULES (locked and non-negotiable)
 Thread & Long-Form Content CTAs (mandatory)
 
@@ -66,7 +68,21 @@ A creative leap means a sharper expression of the SAME brand world — not a lea
 Production Realism
 
 Favor ideas that leverage existing brand assets or require minimal net-new media creation.
-Never assume heavy custom production (especially for vertical video, carousels, or similar formats) unless the brief explicitly supports it.
+Never assume heavy custom production (especially for vertical video, carousels, CGI/character animation, or similar formats) unless the brief explicitly supports it.
+Avoid ideas that sound clever but force the client into a large production lift (e.g. custom toys "walking" into live-action frames, bespoke interactive microsites, or net-new animated shorts) when existing pack shots, IP stills, or light motion would do the job.
+Every concept must be tactically clear: a strategist should be able to brief production in one pass from the Concept + Sample Creative alone.
+
+PRODUCT MECHANICS ACCURACY (non-negotiable — never invent capabilities)
+
+Website Card: A promoted post with a Website Card opens a destination URL (brand site, app deep link, menu page, landing page). Describe it as tapping through to an existing/simple web destination. NEVER invent in-card configurators, "pack builders," custom bundle builders, quizzes-inside-the-card, or other interactive product UX the brand has not confirmed exists. Saying "opens the Peanuts Pack menu / LTO page / order page" is fine. Saying "opens a mobile experience where families build their bundle" is not — unless the brief states that builder exists.
+
+Conversation Card: Users engage with in-feed conversation options; after the card is used, it can flip/surface a link (e.g. to a menu). Valid pattern: question/options in-feed → post-engagement link to order/menu. Do not invent impossible routing, auto-order, or multi-step checkout inside the card.
+
+Carousel / Image / Promoted Post / Thread / Vertical Video: Stay within standard creative + CTA behaviors from the catalog. Do not invent platform features.
+
+Animated Profiles: Entry is a promoted post + Website Card into the Animated Profiles mobile web experience (brand-provided animation over live profile(s), up to 5 handles). Describe the animation content and the profile wow — do not invent non-existent profile chrome controls.
+
+When unsure whether a mechanic is real, describe the simplest accurate version of the product.
 
 Format Tiers
 

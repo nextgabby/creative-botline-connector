@@ -837,18 +837,22 @@ Return ONLY valid JSON, no markdown, no explanation:
 {"directed_at_botline": true or false, "intent": "more" or "revise" or "expand" or "social" or "chat" or "other", "target_idea": "<concept name or null>", "critique": "<short summary of what they disliked or want fixed, or null>"}
 
 Rules:
-- "more" = explicitly asking for additional/new/different creative concepts/ideas (e.g. "give me more ideas", "another round"). No strong critique required.
+- "more" = explicitly asking for additional/new/different creative concepts/ideas (e.g. "give me more ideas", "another round", "more ideas maybe with an animated profile"). No strong critique required.
 - "revise" = critiquing prior ideas AND wanting a replacement set of better concepts (e.g. "these don't make sense, give me better ones", "make them good", "try again"). Fill "critique" with the key complaints. Must imply they want NEW ideas, not just an explanation.
 - "expand" = asking to go deeper on ONE specific concept (set target_idea to the concept name)
-- "social" = a pure thank-you, compliment, greeting, or light banter directed at the botline with NO request to regenerate and NO substantive question that needs answering (e.g. "thanks!", "YOU are it!!")
-- "chat" = asking a question ABOUT prior ideas, process, or reasoning — wants an explanation or conversation, NOT a new concept dump. Examples: "what were you thinking?", "what was going on with those spooky ideas?", "why did you suggest X?", "explain Concept 2", "how does RIN work?". Fill "critique" if they also name what was wrong, but do NOT treat explanation requests as revise.
+- "social" = a pure thank-you, compliment, greeting, or light banter directed at the botline with NO request to regenerate and NO substantive question that needs answering (e.g. "thanks!", "Thank you Gronk", "YOU are it!!")
+- "chat" = asking a question ABOUT prior ideas, process, or reasoning DIRECTED AT THE BOT — wants an explanation or conversation, NOT a new concept dump. Examples: "what were you thinking?", "what was going on with those spooky ideas?", "why did you suggest X?", "explain Concept 2", "how does RIN work?". Fill "critique" if they also name what was wrong, but do NOT treat explanation requests as revise.
 - "other" = a directed instruction that doesn't fit the above (rare). Prefer "chat" for questions.
 - CRITICAL: Quoting or naming bad concepts while asking "what/why/how were you thinking" = "chat", NOT "revise" or "more". Only "revise" if they clearly want new ideas generated.
 - If the message BOTH critiques ideas AND asks for more/better ideas, prefer "revise" over "chat" or "social".
 - Sarcastic praise of bad ideas ("bold", "Lynchian", "I admire that") with no ask for new ideas = "chat" or "social". With an ask for new ideas = "revise".
-- Addressing the bot as "Grok", "botline", "CreativeBotline", or "you" (when clearly the bot) counts as directed even without an @mention.
-- If the person is discussing ideas with their team, making a decision ("let's go with #2"), expressing a preference ("love idea 3"), or reacting without asking the bot to act, set directed_at_botline to false.
-- A thank-you TO the botline ("thanks botline!", "ty!") is social+directed. Praise OF the ideas as a team decision ("these are great, let's run with it") is NOT directed.
+- Addressing the bot as "Grok", "Gronk", "botline", "CreativeBotline", or "you" (when clearly the bot) counts as directed even without an @mention — UNLESS the message clearly tells the bot to stay out.
+- STAY SILENT (directed_at_botline false) when:
+  • People are discussing ideas with their team, making a decision, or asking each other clarifying questions
+  • Someone @mentions a human teammate (and not the bot) about the ideas
+  • Someone says the bot should not answer / they will handle tweaks themselves (e.g. "not you grok", "I will make more tweaks not you", "don't answer", "stay out")
+  • Someone asks "what is specifically weird?" in a teammate discussion after human feedback — that question is for the human who gave the feedback, not the bot, unless they clearly @ the bot
+- A thank-you TO the botline ("thanks botline!", "ty!", "Thank you Gronk") is social+directed. Praise OF the ideas as a team decision ("these are great, let's run with it") is NOT directed.
 - When genuinely unsure, default to directed_at_botline false. Silence is safe; @mention is always available.`;
 
 async function classifyFollowUp(replyText, lastBotResponse) {
@@ -950,6 +954,17 @@ async function handleThreadFollowUp(event, client) {
       return;
     }
 
+    // Hard silence: human tells the bot to stay out / they'll handle tweaks
+    const stayOut =
+      /\bnot you[, ]+(grok|gronk|botline|bot)\b/i.test(replyText) ||
+      /\bi(?:'|’)ll (?:make|do|handle).{0,40}not you\b/i.test(replyText) ||
+      /\b(?:don(?:'|’)t|do not) (?:answer|reply|respond)\b/i.test(replyText) ||
+      /\bstay out\b/i.test(replyText);
+    if (stayOut && !mentionsBot) {
+      console.log(`[follow-up] Intent: stay-out phrasing → silent`);
+      return;
+    }
+
     // Always classify intent (even on @mention — determines social/more/revise/expand routing)
     const lastBotResponse = botResponses.length ? botResponses[botResponses.length - 1] : null;
     const classification = await classifyFollowUp(followUpText, lastBotResponse);
@@ -988,12 +1003,14 @@ async function handleThreadFollowUp(event, client) {
         : "(no prior concepts in this thread)";
       const isSocial = intent === "social";
       const chatSystem = isSocial
-        ? "You are Creative Botline — a senior Creative Strategist on Slack. Reply warmly and wittily in 1-2 sentences. You are the bot (sometimes called Grok / Botline / \"it\"). Do not generate new concepts or ideas. Keep it brief and human."
+        ? "You are Creative Botline — a senior Creative Strategist on Slack. Reply warmly and wittily in 1-2 sentences. You are the bot (sometimes called Grok / Gronk / Botline / \"it\"). Do not generate new concepts or ideas. Do not invent that nicknames or jokes were part of the creative concepts. Keep it brief and human."
         : `You are Creative Botline — a senior Creative Strategist on Slack. The human is asking a question about prior ideas or process — answer it conversationally.
 
 Rules:
 - Answer the question directly. Be honest, self-aware, and concise (2–6 sentences unless they need a bit more).
 - If they ask what you were thinking / why ideas were off-tone or spooky, explain the likely miss plainly (e.g. over-indexed on "clever/feed-stopping" and drifted into abstract/surreal territory instead of staying in the brand world) and own it.
+- ONLY reference concepts, names, or details that actually appear in PRIOR CONCEPTS below. Never invent that something (e.g. a nickname like "Gronk", a celebrity mashup, or a surreal motif) was "woven into" the ideas if it is not in the prior concepts text.
+- If a human teammate said ideas were "weird," and someone asks what was weird, either stay high-level about possible tone/tactical issues visible in the prior concepts OR say you should let that teammate clarify — do not fabricate a specific critique that isn't supported by the thread.
 - Do NOT generate a new set of creative concepts. Do NOT use the Concept 1 / Primary X Tactic output format.
 - Do NOT append the Creative Strategy support closing note.
 - If they also want new ideas, invite them to ask for another round — but do not generate them in this reply.
@@ -1106,8 +1123,11 @@ Rules:
       `This is a follow-up request, not an initial brief. Read the FOLLOW-UP REQUEST below carefully and honor it exactly:\n` +
       `- If the user specifies a NUMBER of ideas (e.g. "give me 2 more", "one more idea", "3 ideas"), ` +
       `generate exactly that number. Do NOT default to 5–7.\n` +
-      `- If the user specifies a FORMAT or TACTIC (e.g. "vertical video", "RIN", "carousel", "thread"), ` +
+      `- If the user specifies a FORMAT or TACTIC (e.g. "vertical video", "RIN", "carousel", "thread", "animated profile"), ` +
       `every idea in this response must use that format/tactic. The "one idea per distinct primary tactic" rule does not apply.\n` +
+      `- When the tactic is locked (e.g. all Animated Profiles), still make each concept a DISTINCT creative hook — not five reskins of the same animation beat.\n` +
+      `- Stay product-accurate: Website Cards open a URL/menu destination (no invented builders); Conversation Cards can flip to a link after engagement; Animated Profiles = promoted entry into the profile animation experience (up to 5 handles).\n` +
+      `- Prefer low-lift executions that use existing brand/IP assets unless the brief supports heavy production.\n` +
       `- If the user specifies BOTH a count and a tactic, honor both.\n` +
       `- If the user does NOT specify a count, generate 5–7 ideas as usual.\n` +
       `- If the user does NOT specify a tactic, use a diverse mix as usual.\n` +
