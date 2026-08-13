@@ -27,6 +27,9 @@ const HOTLINE_CHANNEL_IDS = (
   .map((id) => id.trim())
   .filter(Boolean);
 const HOTLINE_CHANNELS = new Set(HOTLINE_CHANNEL_IDS);
+// First ID = US / primary botline — always used for 12-month example history.
+// Additional IDs (e.g. EMEA) auto-listen for submissions but borrow US history
+// because those channels are new. Follow-ups still lock to the thread's own brief.
 const HISTORY_CHANNEL_ID = HOTLINE_CHANNEL_IDS[0] || null;
 
 const SOCKET_MODE = process.env.SLACK_SOCKET_MODE !== "false"; // default true
@@ -504,16 +507,27 @@ const MAX_EXAMPLES = 25;      // cap examples sent to Grok
 const MAX_PAGES = 50;         // safety ceiling — oldest cutoff normally stops pagination first
 const MSGS_PER_PAGE = 200;    // Slack max per page
 
-// Simple in-memory cache so we don't re-fetch 12 months on every trigger
-let historyCache = { examples: [], fetchedAt: 0 };
+// In-memory cache for US botline history (shared by all hotline channels as style reference)
+let historyCache = { examples: [], fetchedAt: 0, channelId: null };
 const CACHE_TTL_MS = 60 * 60 * 1000; // 60 minutes
 
 async function fetchRecentExamples(client, channelId, currentTs) {
-  // Return cache if fresh
-  if (Date.now() - historyCache.fetchedAt < CACHE_TTL_MS && historyCache.examples.length) {
+  if (!channelId) {
+    console.warn("[history] No channelId provided — returning empty examples");
+    return [];
+  }
+
+  // Return cache if fresh for the history channel
+  if (
+    historyCache.channelId === channelId &&
+    Date.now() - historyCache.fetchedAt < CACHE_TTL_MS &&
+    historyCache.examples.length
+  ) {
+    console.log(`[history] Cache hit for ${channelId} (${historyCache.examples.length} examples)`);
     return historyCache.examples.filter((e) => e.ts !== currentTs).slice(0, MAX_EXAMPLES);
   }
 
+  console.log(`[history] Fetching up to ${HISTORY_MONTHS} months from US/history channel ${channelId}`);
   const examples = [];
   const oldest = String(Math.floor(Date.now() / 1000) - HISTORY_MONTHS * 30 * 24 * 60 * 60);
   let totalScanned = 0;
@@ -584,16 +598,16 @@ async function fetchRecentExamples(client, channelId, currentTs) {
       if (!cursor) break;
     }
   } catch (err) {
-    console.error("[history] Failed to fetch:", err.message);
+    console.error(`[history] Failed to fetch channel ${channelId}:`, err.message);
   }
 
   // Sort newest-first, cache
   examples.sort((a, b) => parseFloat(b.ts) - parseFloat(a.ts));
-  historyCache = { examples, fetchedAt: Date.now() };
+  historyCache = { examples, fetchedAt: Date.now(), channelId };
 
   const withReplies = examples.filter((e) => e.response).length;
-  console.log(`[history] Paginated ${pagesUsed} pages, scanned ${totalScanned} messages`);
-  console.log(`[history] ${examples.length} matched as submissions, ${withReplies} with human replies`);
+  console.log(`[history] channel=${channelId} pages=${pagesUsed} scanned=${totalScanned}`);
+  console.log(`[history] channel=${channelId} matched=${examples.length} withReplies=${withReplies}`);
 
   // Prefer examples with human replies, fill remaining slots with reply-less
   const replied = examples.filter((e) => e.ts !== currentTs && e.response);
@@ -607,7 +621,11 @@ function formatExamples(examples) {
   if (!examples.length) return "";
 
   const parts = [
-    "BOTLINE INTELLIGENCE — #x-creative-botline submissions + strategist replies (last 12 months):\n",
+    "BOTLINE INTELLIGENCE — past US botline submissions + strategist replies (last 12 months).\n" +
+      "Use these ONLY for tone, quality bar, structure, and what worked for similar briefs.\n" +
+      "CRITICAL: Never import another submission's brand, IP, characters, products, or campaign world into the CURRENT thread's brief " +
+      "(e.g. never pull Peanuts/Snoopy/Burger King into a Betclic brief, or vice versa).\n" +
+      "The ORIGINAL BRIEF / NEW BRIEF in this request is the only brand world allowed.\n",
   ];
 
   for (let i = 0; i < examples.length; i++) {
@@ -686,6 +704,8 @@ async function callGrok(briefText, examples, { images = [], docs = [] } = {}) {
     text:
       "Generate 5–7 creative concepts for this brief following every rule in your system prompt. " +
       "Every concept must pass Brand World Fidelity and the Quality Bar. " +
+      "BRIEF LOCK: Use ONLY the brand, IP, campaign, and product world from NEW BRIEF above. " +
+      "Past botline submissions are style/quality reference only — never import another brief's brand or campaign. " +
       "Clever and feed-stopping means brand-true insight — never abstract, spooky, or Lynchian when the brand world is warm/playful/nostalgic. " +
       "Never pitch Follower Ads or Collection Ads.",
   });
@@ -1053,7 +1073,8 @@ Rules:
       return;
     }
 
-    // 6. Fetch botline examples (hits 60-min cache from the initial brief)
+    // 6. Fetch US botline examples for style/quality (EMEA has little history of its own).
+    // Thread brief + prior ideas below are what keep this reply on the correct brand.
     const examples = await fetchRecentExamples(client, HISTORY_CHANNEL_ID, event.thread_ts);
     const examplesBlock = formatExamples(examples);
 
@@ -1070,22 +1091,32 @@ Rules:
       content.push({ type: "input_text", text: examplesBlock });
     }
 
-    // Structured context as one input_text block
-    const contextParts = [`ORIGINAL BRIEF:\n${originalBrief}`];
+    // Structured context as one input_text block — thread brief + prior ideas are authoritative
+    const contextParts = [
+      `THIS THREAD'S ORIGINAL BRIEF (authoritative — the only brand/campaign world allowed):\n${originalBrief}`,
+      `BRIEF LOCK (non-negotiable):\n` +
+        `You are continuing THIS Slack thread only. Ignore brands/campaigns from botline intelligence examples unless they match this brief.\n` +
+        `If the follow-up only names a tactic (e.g. "Dynamic Cards" / "only Dynamic Cards"), keep that tactic AND this thread's brand/campaign — ` +
+        `do not switch to any other brand/IP from US history examples.\n` +
+        `Failure mode to avoid: answering a Betclic Ligue 1 brief with Peanuts/Snoopy/Burger King creatives.`,
+    ];
 
     if (botResponses.length) {
-      contextParts.push(`PREVIOUS CREATIVE IDEAS:\n${botResponses.join("\n\n---\n\n")}`);
+      contextParts.push(
+        `IDEAS ALREADY DELIVERED IN THIS THREAD (do not repeat; stay in the same brand world):\n` +
+          `${botResponses.join("\n\n---\n\n")}`
+      );
     }
 
     // Intent-specific instructions
     if (intent === "more" && botResponses.length) {
       contextParts.push(
         `MANDATORY — NET-NEW IDEAS ONLY:\n` +
-        `The PREVIOUS CREATIVE IDEAS above are already delivered and OFF LIMITS. ` +
-        `Do NOT repeat, rephrase, or create variations of any concept or primary tactic already used. ` +
+        `The IDEAS ALREADY DELIVERED IN THIS THREAD above are OFF LIMITS. ` +
+        `Do NOT repeat, rephrase, or create variations of any concept or primary tactic already used in this thread. ` +
         `You must generate completely new concepts built on DIFFERENT primary X tactics that have not ` +
-        `appeared in this thread. Every idea must be a genuine net-new addition to the set. ` +
-        `Raise the quality bar: brand-world fidelity first, then cleverness. Do not drift into abstract, ` +
+        `appeared in this thread (unless the follow-up locks you to one tactic). Every idea must be a genuine net-new addition. ` +
+        `Stay in THIS THREAD'S ORIGINAL BRIEF brand world. Raise the quality bar: brand-world fidelity first, then cleverness. Do not drift into abstract, ` +
         `spooky, Lynchian, or brand-agnostic concepts to force novelty.`
       );
     }
@@ -1093,11 +1124,12 @@ Rules:
     if (intent === "revise" && botResponses.length) {
       contextParts.push(
         `MANDATORY — REVISE AFTER CRITIQUE:\n` +
-        `Prior ideas missed the mark. Generate a replacement set that fixes the feedback.\n` +
+        `Prior ideas in THIS THREAD missed the mark. Generate a replacement set that fixes the feedback.\n` +
         `Critique to honor: ${critique || followUpText}\n` +
         `Rules for this revision:\n` +
-        `- Stay locked to the ORIGINAL BRIEF brand/IP/campaign world. Every concept must name or clearly use those elements.\n` +
+        `- Stay locked to THIS THREAD'S ORIGINAL BRIEF brand/IP/campaign world. Every concept must name or clearly use those elements.\n` +
         `- Do NOT recycle the rejected concepts, even with new titles.\n` +
+        `- Do NOT borrow brands/IPs from US botline history examples.\n` +
         `- Do NOT "fix" quality problems by going more abstract, uncanny, dreamlike, or avant-garde.\n` +
         `- Clever = sharp cultural insight + brand-true twist + platform-native mechanic. Not surrealism.\n` +
         `- Prefer currently available standard tactics. Never pitch Follower Ads or Collection Ads.\n` +
@@ -1110,10 +1142,10 @@ Rules:
     if (intent === "expand" && targetIdea) {
       contextParts.push(
         `EXPAND REQUEST:\n` +
-        `Take the concept "${targetIdea}" from the PREVIOUS CREATIVE IDEAS and go deeper. ` +
+        `Take the concept "${targetIdea}" from the IDEAS ALREADY DELIVERED IN THIS THREAD and go deeper. ` +
         `Provide a richer, more detailed version of this ONE concept — fuller creative execution, ` +
         `more sample creative, tactical nuance. Do not generate other concepts. ` +
-        `Keep it firmly inside the brand world from the ORIGINAL BRIEF.`
+        `Keep it firmly inside THIS THREAD'S ORIGINAL BRIEF brand world.`
       );
     }
 
@@ -1287,14 +1319,15 @@ app.event("message", async ({ event, client }) => {
       text: `:brain: Generating creative ideas for *${requestId}*...`,
     });
 
-    // 4. Fetch recent examples for context (up to 12 months)
-    // Always from the original botline channel (first HOTLINE_CHANNEL_IDS entry)
+    // 4. Fetch US botline examples for style/quality reference (all regions share this pool)
     const examples = await fetchRecentExamples(
       client,
       HISTORY_CHANNEL_ID,
       event.ts
     );
-    console.log(`[botline] Fetched ${examples.length} past examples`);
+    console.log(
+      `[botline] Fetched ${examples.length} US history examples (request channel=${event.channel}, history=${HISTORY_CHANNEL_ID})`
+    );
 
     // 5. Call Grok
     const grokResponse = await callGrok(briefText, examples, { images, docs });
@@ -1354,6 +1387,7 @@ app.event("app_mention", async ({ event, client }) => {
     `Creative Botline is running (${SOCKET_MODE ? "Socket Mode" : `HTTP :${PORT}`})`
   );
   console.log(
-    `[startup] Hotline channels: ${[...HOTLINE_CHANNELS].join(", ") || "(none)"} | history from: ${HISTORY_CHANNEL_ID || "(none)"}`
+    `[startup] Hotline channels: ${[...HOTLINE_CHANNELS].join(", ") || "(none)"} | ` +
+      `shared history from US/first channel: ${HISTORY_CHANNEL_ID || "(none)"}`
   );
 })();

@@ -19,8 +19,10 @@ Parses structured fields (Request ID, Brand, Campaign, Handle, Budget, KPI, CTA,
 Downloads attached images (vision) + documents/decks (text extraction)
         |
         v
-Paginates back 12 months of #x-creative-botline history via conversations.history
-  + fetches strategist reply threads for each submission (cached 30 min)
+Paginates back 12 months of US (#x-creative-botline) history via conversations.history
+  + fetches strategist reply threads for each submission (cached 60 min)
+  + EMEA and other hotline channels reuse this US history for style/quality
+  + Follow-ups lock to the requesting thread's brief + ideas already sent
         |
         v
 Calls Grok (grok-4.3) with:
@@ -65,9 +67,10 @@ cp .env.example .env
 Fill in all values. To find your `BOT_USER_ID`, check the bot's profile in Slack
 or call `auth.test` in the Slack API tester. To find channel IDs for
 `HOTLINE_CHANNEL_IDS`, right-click each channel name in Slack > "Copy link" >
-the ID is the last segment. List the original botline channel first — history
-and examples are always loaded from that first ID. Additional IDs only enable
-auto-listen for new submissions (invite the bot to each channel).
+the ID is the last segment. List the **US botline channel first** — history and
+examples are always loaded from that first ID. Additional IDs (e.g. EMEA) only
+enable auto-listen for new submissions there (invite the bot to each channel).
+Follow-ups always re-read the requesting thread's original brief and prior bot ideas.
 
 ### 3. Install & Run
 
@@ -117,6 +120,6 @@ The bot replies in-thread with a concise creative response.
 - **Detection**: Regex for "Submit a Botline Request" (or legacy "Hotline") or `XX-NNNNN` Request ID patterns
 - **Parsing**: Regex extraction of structured fields (Request ID, Brand, Campaign, Handle, Budget, KPI, Objective, Audience, Flight Dates, Value Prop, CTA); falls back to raw text
 - **Files**: Images are downloaded from Slack, base64-encoded, and sent to Grok as `image_url` content blocks. Text-based documents (PDFs, decks) are downloaded and extracted as text.
-- **History**: Paginates `conversations.history` back 12 months (up to 50 pages of 200 messages), filters for botline submissions, fetches human strategist thread replies via `conversations.replies`, caches results for 60 minutes. Up to 25 past examples are sent to Grok as "Botline Intelligence."
+- **History**: Paginates `conversations.history` back 12 months on the **US / first** hotline channel (up to 50 pages of 200 messages), filters for botline submissions, fetches human strategist thread replies via `conversations.replies`, caches results for 60 minutes. Up to 25 past examples are sent to Grok as "Botline Intelligence" for every region (EMEA reuses US history). **Follow-ups** re-load that thread's original brief + all prior bot concepts and enforce a brief lock so tactic-only asks (e.g. "only Dynamic Cards") cannot swap in another brand from history.
 - **Dedup**: In-memory Set of processed `ts` values (capped at 500) to avoid re-processing
 - **Grok**: System prompt is sent verbatim from `system-prompt.txt`. Past examples + new brief + attachments go in the user message. Model: `grok-4.3-latest`, max 8000 tokens, temperature 0.72.
