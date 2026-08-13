@@ -266,12 +266,17 @@ function formatBrief(brief) {
 }
 
 /**
- * Detect when a brief locks to a single X product/format.
+ * Detect when a brief or follow-up locks to a single X product/format.
  * Returns canonical tactic name or null.
+ *
+ * @param {string} text
+ * @param {{ permissive?: boolean }} [opts] - permissive=true for short follow-up asks
+ *   ("more Dynamic Cards", "with an animated profile") without requiring "using X solution".
  */
-function detectLockedFormat(text) {
+function detectLockedFormat(text, opts = {}) {
   if (!text) return null;
   const t = text;
+  const permissive = !!opts.permissive;
 
   // Ordered: longer / more specific names first
   const catalog = [
@@ -285,9 +290,13 @@ function detectLockedFormat(text) {
     { name: "Dynamic Cards", re: /dynamic cards?/i },
     { name: "Conversation Card", re: /conversation cards?/i },
     { name: "Website Card", re: /website cards?/i },
-    { name: "Vertical Video Ads", re: /vertical video ads?/i },
-    { name: "Carousel Ads", re: /carousel ads?/i },
+    { name: "Vertical Video Ads", re: /vertical videos?(?:\s+ads?)?/i },
+    { name: "Carousel Ads", re: /carousels?(?:\s+ads?)?/i },
+    { name: "Threaded Posts", re: /threaded posts?|thread ads?/i },
+    { name: "Promoted Posts", re: /promoted posts?/i },
     { name: "X Live", re: /\bx live\b/i },
+    { name: "Image Ads", re: /image ads?/i },
+    { name: "Polls", re: /\bpolls?\b/i },
   ];
 
   const found = [];
@@ -301,7 +310,8 @@ function detectLockedFormat(text) {
     /using\s+[\w\s-]{0,40}solution/i.test(t) ||
     /\bonly\s+/i.test(t) ||
     /\bvia\s+/i.test(t) ||
-    /must use|required format|format lock| exclusively /i.test(t);
+    /must use|required format|format lock|exclusively/i.test(t) ||
+    /\bwith (?:an? |the )?[\w\s-]{0,40}(?:profile|card|carousel|video|rin|sin|lens|overlay)/i.test(t);
 
   // Strong signal: "Using Dynamic Cards solution" style
   const usingSolution = /using\s+([^.!\n]{0,60}?)\s+solution/i.exec(t);
@@ -321,12 +331,12 @@ function detectLockedFormat(text) {
     }
   }
 
+  // Follow-up asks: if they name one product, lock to it
+  if (permissive && found.length === 1) return found[0];
+  if (permissive && found.length > 1) return found[0];
+
   // CTA / "want people to do" often says "Using Dynamic Cards solution..."
-  if (exclusive && found.length === 1) return found[0];
-  if (exclusive && found.length > 1) {
-    // Prefer the one appearing in "using … solution" or first exclusive phrase
-    return found[0];
-  }
+  if (exclusive && found.length >= 1) return found[0];
 
   // Single product mentioned in CTA/value-prop with "solution" nearby
   if (found.length === 1 && /solution/i.test(t)) return found[0];
@@ -1179,7 +1189,7 @@ Rules:
 
     // Structured context as one input_text block — thread brief + prior ideas are authoritative
     const briefLockedFormat = detectLockedFormat(originalBrief);
-    const followUpLockedFormat = detectLockedFormat(followUpText);
+    const followUpLockedFormat = detectLockedFormat(followUpText, { permissive: true });
     const lockedFormat = followUpLockedFormat || briefLockedFormat;
 
     const contextParts = [
