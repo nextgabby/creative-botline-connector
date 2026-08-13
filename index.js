@@ -265,6 +265,75 @@ function formatBrief(brief) {
   return lines.join("\n");
 }
 
+/**
+ * Detect when a brief locks to a single X product/format.
+ * Returns canonical tactic name or null.
+ */
+function detectLockedFormat(text) {
+  if (!text) return null;
+  const t = text;
+
+  // Ordered: longer / more specific names first
+  const catalog = [
+    { name: "Animated Profiles (up to 5 Handles)", re: /animated profiles?/i },
+    { name: "Sequential Instant Notifications (SIN)", re: /\bSIN\b|sequential instant notifications?/i },
+    { name: "Randomized Instant Notifications (RIN)", re: /\bRIN\b|randomized instant notifications?/i },
+    { name: "Scheduled Notification Program", re: /scheduled notification programs?/i },
+    { name: "Branded Overlay", re: /branded overlay/i },
+    { name: "Post Lens", re: /post lens/i },
+    { name: "Trend Genius", re: /trend genius/i },
+    { name: "Dynamic Cards", re: /dynamic cards?/i },
+    { name: "Conversation Card", re: /conversation cards?/i },
+    { name: "Website Card", re: /website cards?/i },
+    { name: "Vertical Video Ads", re: /vertical video ads?/i },
+    { name: "Carousel Ads", re: /carousel ads?/i },
+    { name: "X Live", re: /\bx live\b/i },
+  ];
+
+  const found = [];
+  for (const item of catalog) {
+    if (item.re.test(t)) found.push(item.name);
+  }
+  if (!found.length) return null;
+
+  // Explicit exclusivity / "using X solution" / campaign framed around the product
+  const exclusive =
+    /using\s+[\w\s-]{0,40}solution/i.test(t) ||
+    /\bonly\s+/i.test(t) ||
+    /\bvia\s+/i.test(t) ||
+    /must use|required format|format lock| exclusively /i.test(t);
+
+  // Strong signal: "Using Dynamic Cards solution" style
+  const usingSolution = /using\s+([^.!\n]{0,60}?)\s+solution/i.exec(t);
+  if (usingSolution) {
+    for (const item of catalog) {
+      if (item.re.test(usingSolution[1]) || item.re.test(usingSolution[0])) {
+        return item.name;
+      }
+    }
+  }
+
+  // Campaign name often encodes the product (e.g. "Ligue 1 Scoring Dynamic Cards")
+  const campaignOnly = /Campaign(?: Name)?:\s*([^\n]+)/i.exec(t);
+  if (campaignOnly) {
+    for (const item of catalog) {
+      if (item.re.test(campaignOnly[1])) return item.name;
+    }
+  }
+
+  // CTA / "want people to do" often says "Using Dynamic Cards solution..."
+  if (exclusive && found.length === 1) return found[0];
+  if (exclusive && found.length > 1) {
+    // Prefer the one appearing in "using … solution" or first exclusive phrase
+    return found[0];
+  }
+
+  // Single product mentioned in CTA/value-prop with "solution" nearby
+  if (found.length === 1 && /solution/i.test(t)) return found[0];
+
+  return null;
+}
+
 /* ───────────────────────────────────────────
    FILE HANDLING (Slack attachments)
    ─────────────────────────────────────────── */
@@ -671,6 +740,20 @@ async function callGrok(briefText, examples, { images = [], docs = [] } = {}) {
   // 3. The new brief
   content.push({ type: "input_text", text: `NEW BRIEF:\n${briefText}` });
 
+  const lockedFormat = detectLockedFormat(briefText);
+  if (lockedFormat) {
+    console.log(`[grok] FORMAT LOCK detected: ${lockedFormat}`);
+    content.push({
+      type: "input_text",
+      text:
+        `FORMAT LOCK (non-negotiable for this brief):\n` +
+        `The brief requires PRIMARY X TACTIC = "${lockedFormat}" for EVERY concept.\n` +
+        `Do NOT use Website Cards, Vertical Video, Carousels, Conversation Cards, RIN, Trend Genius, or any other primary tactic.\n` +
+        `Generate 5–7 DISTINCT creative concepts that all use "${lockedFormat}" as Primary X Tactic.\n` +
+        `Vary hooks and sample creative — not the tactic. The diverse-mix / one-tactic-per-idea rule is suspended.`,
+    });
+  }
+
   // 4. Attached images from Slack (base64 vision)
   for (const img of images) {
     const buf = await downloadAsBuffer(img.url, SLACK_BOT_TOKEN);
@@ -706,6 +789,9 @@ async function callGrok(briefText, examples, { images = [], docs = [] } = {}) {
       "Every concept must pass Brand World Fidelity and the Quality Bar. " +
       "BRIEF LOCK: Use ONLY the brand, IP, campaign, and product world from NEW BRIEF above. " +
       "Past botline submissions are style/quality reference only — never import another brief's brand or campaign. " +
+      (lockedFormat
+        ? `FORMAT LOCK is active: every Primary X Tactic must be "${lockedFormat}". `
+        : "If no format is locked, use a diverse mix with one idea per distinct primary tactic. ") +
       "Clever and feed-stopping means brand-true insight — never abstract, spooky, or Lynchian when the brand world is warm/playful/nostalgic. " +
       "Never pitch Follower Ads or Collection Ads.",
   });
@@ -719,7 +805,7 @@ async function callGrok(briefText, examples, { images = [], docs = [] } = {}) {
   console.log(
     `[grok] Sending: ${UPLOADED_REF_FILES.length} ref files, ${examples.length} examples, ` +
     `${inputImageCount} image(s), ${inputDocCount} doc(s), brief=${briefText.length} chars, ` +
-    `total text=${totalTextLen} chars`
+    `formatLock=${lockedFormat || "none"}, total text=${totalTextLen} chars`
   );
 
   // Call x.ai Responses API (with file-ingest retry)
@@ -1092,6 +1178,10 @@ Rules:
     }
 
     // Structured context as one input_text block — thread brief + prior ideas are authoritative
+    const briefLockedFormat = detectLockedFormat(originalBrief);
+    const followUpLockedFormat = detectLockedFormat(followUpText);
+    const lockedFormat = followUpLockedFormat || briefLockedFormat;
+
     const contextParts = [
       `THIS THREAD'S ORIGINAL BRIEF (authoritative — the only brand/campaign world allowed):\n${originalBrief}`,
       `BRIEF LOCK (non-negotiable):\n` +
@@ -1100,6 +1190,15 @@ Rules:
         `do not switch to any other brand/IP from US history examples.\n` +
         `Failure mode to avoid: answering a Betclic Ligue 1 brief with Peanuts/Snoopy/Burger King creatives.`,
     ];
+
+    if (lockedFormat) {
+      console.log(`[follow-up] FORMAT LOCK active: ${lockedFormat} (from ${followUpLockedFormat ? "follow-up" : "original brief"})`);
+      contextParts.push(
+        `FORMAT LOCK (non-negotiable):\n` +
+          `PRIMARY X TACTIC for EVERY concept must be "${lockedFormat}".\n` +
+          `Do not mix in other primary tactics. Deliver distinct creative hooks within "${lockedFormat}" only.`
+      );
+    }
 
     if (botResponses.length) {
       contextParts.push(
@@ -1111,13 +1210,18 @@ Rules:
     // Intent-specific instructions
     if (intent === "more" && botResponses.length) {
       contextParts.push(
-        `MANDATORY — NET-NEW IDEAS ONLY:\n` +
-        `The IDEAS ALREADY DELIVERED IN THIS THREAD above are OFF LIMITS. ` +
-        `Do NOT repeat, rephrase, or create variations of any concept or primary tactic already used in this thread. ` +
-        `You must generate completely new concepts built on DIFFERENT primary X tactics that have not ` +
-        `appeared in this thread (unless the follow-up locks you to one tactic). Every idea must be a genuine net-new addition. ` +
-        `Stay in THIS THREAD'S ORIGINAL BRIEF brand world. Raise the quality bar: brand-world fidelity first, then cleverness. Do not drift into abstract, ` +
-        `spooky, Lynchian, or brand-agnostic concepts to force novelty.`
+        lockedFormat
+          ? `MANDATORY — NET-NEW IDEAS ONLY (FORMAT LOCKED):\n` +
+            `The IDEAS ALREADY DELIVERED IN THIS THREAD above are OFF LIMITS as creative hooks. ` +
+            `Generate completely new concepts that ALL still use Primary X Tactic "${lockedFormat}". ` +
+            `Do not switch tactics for variety. Stay in THIS THREAD'S ORIGINAL BRIEF brand world.`
+          : `MANDATORY — NET-NEW IDEAS ONLY:\n` +
+            `The IDEAS ALREADY DELIVERED IN THIS THREAD above are OFF LIMITS. ` +
+            `Do NOT repeat, rephrase, or create variations of any concept or primary tactic already used in this thread. ` +
+            `You must generate completely new concepts built on DIFFERENT primary X tactics that have not ` +
+            `appeared in this thread (unless the follow-up locks you to one tactic). Every idea must be a genuine net-new addition. ` +
+            `Stay in THIS THREAD'S ORIGINAL BRIEF brand world. Raise the quality bar: brand-world fidelity first, then cleverness. Do not drift into abstract, ` +
+            `spooky, Lynchian, or brand-agnostic concepts to force novelty.`
       );
     }
 
@@ -1130,12 +1234,14 @@ Rules:
         `- Stay locked to THIS THREAD'S ORIGINAL BRIEF brand/IP/campaign world. Every concept must name or clearly use those elements.\n` +
         `- Do NOT recycle the rejected concepts, even with new titles.\n` +
         `- Do NOT borrow brands/IPs from US botline history examples.\n` +
+        (lockedFormat
+          ? `- FORMAT LOCK: every Primary X Tactic must be "${lockedFormat}".\n`
+          : `- Different primary tactics across the set are good, but only when they fit — never force a tactic that doesn't serve the brief.\n`) +
         `- Do NOT "fix" quality problems by going more abstract, uncanny, dreamlike, or avant-garde.\n` +
         `- Clever = sharp cultural insight + brand-true twist + platform-native mechanic. Not surrealism.\n` +
         `- Prefer currently available standard tactics. Never pitch Follower Ads or Collection Ads.\n` +
         `- If prior ideas were too generic (product grids / chase videos), invent a stronger hook inside the brand world.\n` +
-        `- If prior ideas were off-tone for the brand, match the brand's emotional register exactly.\n` +
-        `- Different primary tactics across the set are good, but only when they fit — never force a tactic that doesn't serve the brief.`
+        `- If prior ideas were off-tone for the brand, match the brand's emotional register exactly.`
       );
     }
 
