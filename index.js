@@ -288,7 +288,6 @@ function detectLockedFormat(text, opts = {}) {
     { name: "Post Lens", re: /post lens/i },
     { name: "Trend Genius", re: /trend genius/i },
     { name: "Dynamic Cards", re: /dynamic cards?/i },
-    { name: "Conversation Card", re: /conversation cards?/i },
     { name: "Website Card", re: /website cards?/i },
     { name: "Vertical Video Ads", re: /vertical videos?(?:\s+ads?)?/i },
     { name: "Carousel Ads", re: /carousels?(?:\s+ads?)?/i },
@@ -342,6 +341,14 @@ function detectLockedFormat(text, opts = {}) {
   if (found.length === 1 && /solution/i.test(t)) return found[0];
 
   return null;
+}
+
+const BANNED_FORMATS = /conversation cards?|convo cards?|collection ads?/i;
+
+function sanitizeLockedFormat(name) {
+  if (!name) return null;
+  if (BANNED_FORMATS.test(name)) return null;
+  return name;
 }
 
 /* ───────────────────────────────────────────
@@ -750,7 +757,7 @@ async function callGrok(briefText, examples, { images = [], docs = [] } = {}) {
   // 3. The new brief
   content.push({ type: "input_text", text: `NEW BRIEF:\n${briefText}` });
 
-  const lockedFormat = detectLockedFormat(briefText);
+  const lockedFormat = sanitizeLockedFormat(detectLockedFormat(briefText));
   if (lockedFormat) {
     console.log(`[grok] FORMAT LOCK detected: ${lockedFormat}`);
     content.push({
@@ -758,9 +765,20 @@ async function callGrok(briefText, examples, { images = [], docs = [] } = {}) {
       text:
         `FORMAT LOCK (non-negotiable for this brief):\n` +
         `The brief requires PRIMARY X TACTIC = "${lockedFormat}" for EVERY concept.\n` +
-        `Do NOT use Website Cards, Vertical Video, Carousels, Conversation Cards, RIN, Trend Genius, or any other primary tactic.\n` +
+        `Do NOT use Website Cards, Vertical Video, Carousels, RIN, Trend Genius, or any other primary tactic unless it is "${lockedFormat}".\n` +
         `Generate 5–7 DISTINCT creative concepts that all use "${lockedFormat}" as Primary X Tactic.\n` +
-        `Vary hooks and sample creative — not the tactic. The diverse-mix / one-tactic-per-idea rule is suspended.`,
+        `Vary hooks and sample creative — not the tactic. The diverse-mix / one-tactic-per-idea rule is suspended.\n` +
+        `Never pitch Conversation Cards or Collection Ads.`,
+    });
+  } else {
+    content.push({
+      type: "input_text",
+      text:
+        `ANTI-DEFAULT MIX (no format lock):\n` +
+        `Generate 5–7 concepts with exactly one idea per distinct primary tactic.\n` +
+        `Do NOT default to Vertical Video Ads + Website Card + Scheduled Notification Program. Include at most TWO of those three.\n` +
+        `At least three ideas must use other allowed formats (Carousel, Promoted Post / Image Ad, Thread, Dynamic Cards if live data fits, Polls, Text Ads, X Live, Articles, RIN/SIN when they fit, etc.).\n` +
+        `Never pitch Conversation Cards, Collection Ads, or Follower Ads.`,
     });
   }
 
@@ -801,9 +819,9 @@ async function callGrok(briefText, examples, { images = [], docs = [] } = {}) {
       "Past botline submissions are style/quality reference only — never import another brief's brand or campaign. " +
       (lockedFormat
         ? `FORMAT LOCK is active: every Primary X Tactic must be "${lockedFormat}". `
-        : "If no format is locked, use a diverse mix with one idea per distinct primary tactic. ") +
+        : "ANTI-DEFAULT MIX: do not default to Vertical Video Ads + Website Card + Scheduled Notification Program. Include at most two of those three; mix in other allowed formats. ") +
       "Clever and feed-stopping means brand-true insight — never abstract, spooky, or Lynchian when the brand world is warm/playful/nostalgic. " +
-      "Never pitch Follower Ads or Collection Ads.",
+      "Never pitch Follower Ads, Collection Ads, or Conversation Cards.",
   });
 
   // Diagnostic: summarize what we're sending to Grok
@@ -1188,8 +1206,10 @@ Rules:
     }
 
     // Structured context as one input_text block — thread brief + prior ideas are authoritative
-    const briefLockedFormat = detectLockedFormat(originalBrief);
-    const followUpLockedFormat = detectLockedFormat(followUpText, { permissive: true });
+    const briefLockedFormat = sanitizeLockedFormat(detectLockedFormat(originalBrief));
+    const followUpLockedFormat = sanitizeLockedFormat(
+      detectLockedFormat(followUpText, { permissive: true })
+    );
     const lockedFormat = followUpLockedFormat || briefLockedFormat;
 
     const contextParts = [
@@ -1274,11 +1294,12 @@ Rules:
       `- If the user specifies a FORMAT or TACTIC (e.g. "vertical video", "RIN", "carousel", "thread", "animated profile"), ` +
       `every idea in this response must use that format/tactic. The "one idea per distinct primary tactic" rule does not apply.\n` +
       `- When the tactic is locked (e.g. all Animated Profiles), still make each concept a DISTINCT creative hook — not five reskins of the same animation beat.\n` +
-      `- Stay product-accurate: Website Cards open a URL/menu destination (no invented builders); Conversation Cards can flip to a link after engagement; Animated Profiles = promoted entry into the profile animation experience (up to 5 handles).\n` +
+      `- Stay product-accurate: Website Cards open a URL/menu destination (no invented builders); Animated Profiles = promoted entry into the profile animation experience (up to 5 handles).\n` +
       `- Prefer low-lift executions that use existing brand/IP assets unless the brief supports heavy production.\n` +
       `- If the user specifies BOTH a count and a tactic, honor both.\n` +
       `- If the user does NOT specify a count, generate 5–7 ideas as usual.\n` +
-      `- If the user does NOT specify a tactic, use a diverse mix as usual.\n` +
+      `- If the user does NOT specify a tactic, use a true mix: at most TWO of Vertical Video Ads / Website Card / Scheduled Notification Program, and at least three other allowed formats.\n` +
+      `- Never pitch Conversation Cards, Collection Ads, or Follower Ads — even if asked.\n` +
       `- Brand World Fidelity, Quality Bar, DEPRECATED PRODUCTS, and tone-match rules from the system prompt ALWAYS apply — they are never overridden.\n` +
       `All other creative rules (output format, concept naming, no hashtags, no demographic targeting, product accuracy) still apply.`
     );
